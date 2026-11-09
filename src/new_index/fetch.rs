@@ -115,7 +115,7 @@ fn bitcoind_fetcher(
                 fetcher_count += 1;
 
                 let blockhashes: Vec<BlockHash> = entries.iter().map(|e| *e.hash()).collect();
-                let blocks = daemon.getblocks(&blockhashes).chain_err(|| {
+                let blocks = daemon.getblocks_sized(&blockhashes).chain_err(|| {
                     format!(
                         "failed to fetch block batch first_hash='{:?}' batch_size='{}'",
                         blockhashes.first(),
@@ -132,11 +132,11 @@ fn bitcoind_fetcher(
                 let block_entries: Vec<BlockEntry> = blocks
                     .into_iter()
                     .zip(entries)
-                    .map(|(block, entry)| {
+                    .map(|((block, size), entry)| {
                         let txids = block.txdata.iter().map(|tx| tx.compute_txid()).collect();
                         BlockEntry {
                             entry: entry.clone(), // TODO: remove this clone()
-                            size: block.total_size() as u32,
+                            size: size as u32,
                             txids,
                             block,
                         }

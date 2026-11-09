@@ -1290,6 +1290,15 @@ impl Daemon {
         header_from_value(self.request("getblockheader", json!([blockhash, /*verbose=*/ false]))?)
     }
 
+    /// Freicoin: the header's serialization, with a merge-mined block's auxiliary proof-of-work.
+    #[cfg(not(feature = "liquid"))]
+    #[trace]
+    pub fn getblockheader_raw(&self, blockhash: &BlockHash) -> Result<Vec<u8>> {
+        let value = self.request("getblockheader", json!([blockhash, /*verbose=*/ false]))?;
+        let hex = value.as_str().chain_err(|| "non-string block header")?;
+        <Vec<u8> as bitcoin::hex::FromHex>::from_hex(hex).chain_err(|| "invalid block header hex")
+    }
+
     #[trace]
     pub(crate) fn getblockheight(&self, blockhash: &BlockHash) -> Result<usize> {
         let info = self.request("getblockheader", json!([blockhash, /*verbose=*/ true]))?;
@@ -1340,6 +1349,17 @@ impl Daemon {
 
     #[trace]
     pub fn getblocks(&self, blockhashes: &[BlockHash]) -> Result<Vec<Block>> {
+        Ok(self
+            .getblocks_sized(blockhashes)?
+            .into_iter()
+            .map(|(block, _)| block)
+            .collect())
+    }
+
+    /// The blocks with their serialized sizes, which (Freicoin) count a merge-mined header's
+    /// auxiliary proof-of-work, which the decoded block drops.
+    #[trace]
+    pub fn getblocks_sized(&self, blockhashes: &[BlockHash]) -> Result<Vec<(Block, usize)>> {
         let params_list: Vec<Value> = blockhashes
             .iter()
             .map(|hash| json!([hash, /*verbose=*/ false]))
@@ -1384,6 +1404,7 @@ impl Daemon {
         }
         let mut blocks = Vec::with_capacity(values.len());
         for (value, requested) in values.into_iter().zip(blockhashes.iter()) {
+            let size = value.as_str().map_or(0, |hex| hex.len() / 2);
             let block = block_from_value(value)?;
             let returned = block.block_hash();
             if returned != *requested {
@@ -1393,7 +1414,7 @@ impl Daemon {
                     returned
                 );
             }
-            blocks.push(block);
+            blocks.push((block, size));
         }
         Ok(blocks)
     }

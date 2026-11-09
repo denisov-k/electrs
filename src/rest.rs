@@ -98,6 +98,11 @@ struct BlockValue {
     #[cfg(not(feature = "liquid"))]
     difficulty: f64,
 
+    /// Freicoin: the parent chain block of a merge-mined block
+    #[cfg(not(feature = "liquid"))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_block: Option<crate::freicoin::aux_pow::ParentBlock>,
+
     #[cfg(feature = "liquid")]
     #[serde(skip_serializing_if = "Option::is_none")]
     ext: Option<elements::BlockExtData>,
@@ -132,6 +137,8 @@ impl BlockValue {
             nonce: header.nonce,
             #[cfg(not(feature = "liquid"))]
             difficulty: header.difficulty_float(),
+            #[cfg(not(feature = "liquid"))]
+            parent_block: None,
 
             #[cfg(feature = "liquid")]
             ext: Some(header.ext.clone()),
@@ -1345,7 +1352,12 @@ fn handle_blocking_request(
                 .chain()
                 .get_block_with_meta(&hash)
                 .ok_or_else(|| HttpError::not_found("Block not found".to_string()))?;
-            let block_value = BlockValue::new(blockhm);
+            #[allow(unused_mut)]
+            let mut block_value = BlockValue::new(blockhm);
+            #[cfg(not(feature = "liquid"))]
+            {
+                block_value.parent_block = query.parent_block(&hash);
+            }
             json_response(block_value, TTL_LONG)
         }
         (&Method::GET, Some(&"block"), Some(hash), Some(&"status"), None, None) => {

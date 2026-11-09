@@ -168,6 +168,306 @@ pub fn tx_fee<'a>(
     total_in.saturating_sub(total_out)
 }
 
+/// Freicoin's merge mining: the parent chain (bitcoin) block an auxiliary proof-of-work commits
+/// to, reconstructed as consensus does it (CBlockHeader::GetAuxiliaryHash in
+/// primitives/block.cpp, CheckAuxiliaryProofOfWork in pow.cpp).
+pub mod aux_pow {
+    use bitcoin::block::{AuxPow, Header};
+    use bitcoin::hashes::{sha256, sha256d, Hash, HashEngine};
+    use bitcoin::{BlockHash, CompactTarget, TxMerkleNode};
+
+    use crate::chain::Network;
+
+    /// The parent chain block of a merge-mined block.
+    #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+    pub struct ParentBlock {
+        /// Its hash: a bitcoin block's, if it met bitcoin's target, else a share's.
+        pub hash: BlockHash,
+        pub prev_blockhash: BlockHash,
+        pub version: i32,
+        pub merkle_root: TxMerkleNode,
+        pub time: u32,
+        pub bits: CompactTarget,
+        pub nonce: u32,
+        pub tx_count: u32,
+        /// Whether its hash meets the merge-mined block's auxiliary target, as consensus checks
+        /// (the first stage): a reconstruction that does is the one the block proves.
+        pub meets_target: bool,
+        /// Whether its hash also meets its own (the parent chain's) target: a block of the parent
+        /// chain, not only a share of the merge-mining pool.
+        pub is_parent_chain_block: bool,
+    }
+
+    /// The tag hash of the merge-mining commitments' path in the parent's Merkle hash map, per
+    /// chain (consensus.aux_pow_path in kernel/chainparams.cpp), in internal byte order.
+    fn aux_pow_path(network: Network) -> [u8; 32] {
+        let hex = match network {
+            Network::Bitcoin => "632938ec752e63b7f63cdd9a16b336c6c5cefbaad66278e402ce59d706f57ff6",
+            Network::Testnet => "e99fc44bfacee2f7e28d135845ff8a385d6d31353928d5b499700f1a2ad1b18b",
+            Network::Signet => "0e2d8c64d9e0280e39f9ce32343aaf4db2c43d346844edbff37b152efeb4ce7f",
+            _ => "d799d41af01c1ac77e6a7793ba046a7432bb6ec250b84e2f5c6f225e05f0fc74",
+        };
+        let mut path = [0u8; 32];
+        for (i, byte) in path.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&hex[62 - 2 * i..64 - 2 * i], 16).unwrap();
+        }
+        path
+    }
+
+    /// The SHA-256 state after the empty string's hash twice (_MidstateIV in consensus/merkle.cpp).
+    const MIDSTATE_IV: [u8; 32] = [
+        0x1e, 0x4e, 0x0f, 0x95, 0x5a, 0x4b, 0xc8, 0x1c, 0x08, 0xc8, 0xaf, 0x1c, 0x94, 0xf3, 0x4b,
+        0x9d, 0x0a, 0xf2, 0xf4, 0x50, 0xdc, 0x24, 0xa3, 0xbc, 0xef, 0x98, 0x31, 0x8f, 0xaf, 0x5e,
+        0x25, 0x06,
+    ];
+
+    /// MerkleHash_Sha256Midstate: a single SHA-256 compression of the pair from MIDSTATE_IV.
+    fn midstate_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+        let mut engine =
+            sha256::HashEngine::from_midstate(sha256::Midstate::from_byte_array(MIDSTATE_IV), 64);
+        engine.input(left);
+        engine.input(right);
+        engine.midstate().to_byte_array()
+    }
+
+    /// Double SHA-256 of the pair, the Merkle tree hash.
+    fn hash_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+        let mut engine = sha256d::Hash::engine();
+        engine.input(left);
+        engine.input(right);
+        sha256d::Hash::from_engine(engine).to_byte_array()
+    }
+
+    fn bit(key: &[u8; 32], n: usize) -> bool {
+        key[31 - n / 8] & (1 << (n % 8)) != 0
+    }
+
+    fn set_bit(key: &mut [u8; 32], n: usize) {
+        key[31 - n / 8] |= 1 << (n % 8);
+    }
+
+    /// calc_bits in consensus/merkle.cpp.
+    fn calc_bits(key: &[u8; 32], begin: usize, end: usize) -> [u8; 32] {
+        let mut ret = [0u8; 32];
+        for idx in begin..end {
+            if bit(key, 255 - idx) {
+                set_bit(&mut ret, end - idx - 1);
+            }
+        }
+        set_bit(&mut ret, end - begin);
+        ret
+    }
+
+    /// calc_remainder in consensus/merkle.cpp.
+    fn calc_remainder(key: &[u8; 32], used: usize) -> [u8; 32] {
+        if used == 0 {
+            return *key;
+        }
+        let mut ret = [0u8; 32];
+        for idx in 0..256 - used {
+            if bit(key, idx) {
+                set_bit(&mut ret, idx);
+            }
+        }
+        ret
+    }
+
+    /// ComputeMerkleMapRootFromBranch; None for an invalid branch.
+    fn merkle_map_root(value: &[u8; 32], branch: &[(u8, [u8; 32])], key: &[u8; 32]) -> Option<[u8; 32]> {
+        let mut total: usize = branch.iter().map(|(skip, _)| 1 + *skip as usize).sum();
+        if total >= 256 {
+            return None;
+        }
+        let mut hash = midstate_pair(&calc_remainder(key, total), value);
+        for (skip, sibling) in branch {
+            total -= 1;
+            let (begin, end) = (total - *skip as usize, total);
+            hash = if key[31 - end / 8] & (1 << (end % 8)) != 0 {
+                midstate_pair(sibling, &hash)
+            } else {
+                midstate_pair(&hash, sibling)
+            };
+            hash = midstate_pair(&calc_bits(key, begin, end), &hash);
+        }
+        Some(hash)
+    }
+
+    /// ComputeMerklePathAndMask: the path and the mask of repeated hashes along a branch of
+    /// `branchlen` hashes to `position`.
+    fn merkle_path_and_mask(branchlen: usize, position: u32) -> (u32, u32) {
+        let mut max = 32usize;
+        while max > 0 && position & (1u32 << (max - 1)) == 0 {
+            max -= 1;
+        }
+        let (mut mask, mut path) = (0u32, position);
+        while max > branchlen {
+            let mut i = max as i64 - 1;
+            while i >= 0 && path & (1u32 << i) != 0 {
+                i -= 1;
+            }
+            if i < 0 {
+                return (0, 0);
+            }
+            let i = i as u32;
+            mask |= 1 << i;
+            let above = !((1u64 << (i + 1)) - 1) as u32;
+            let below = ((1u64 << i) - 1) as u32;
+            path = ((path & above) >> 1) | (path & below);
+            max -= 1;
+        }
+        (path, mask)
+    }
+
+    /// ComputeStableMerkleRootFromBranch; with whether the branch was in non-canonical form.
+    fn stable_merkle_root(leaf: &[u8; 32], branch: &[[u8; 32]], mut path: u32, mut mask: u32) -> ([u8; 32], bool) {
+        let mut hash = *leaf;
+        let mut it = branch.iter();
+        let mut next = it.next();
+        while let Some(sibling) = next {
+            if mask & 1 != 0 {
+                hash = hash_pair(&hash, &hash);
+            } else {
+                hash = if path & 1 != 0 { hash_pair(sibling, &hash) } else { hash_pair(&hash, sibling) };
+                next = it.next();
+                path >>= 1;
+            }
+            mask >>= 1;
+        }
+        while mask & 1 != 0 {
+            hash = hash_pair(&hash, &hash);
+            mask >>= 1;
+        }
+        (hash, path != 0 || mask != 0)
+    }
+
+    /// Whether `hash` (internal byte order) is at most the compact target `bits` shifted left by
+    /// `bias` bits, None if that target is negative, zero, overflows or shifts out of range.
+    fn meets(hash: &[u8; 32], bits: u32, bias: u8) -> Option<bool> {
+        let (exponent, mantissa) = ((bits >> 24) as usize, bits & 0x007f_ffff);
+        if bits & 0x0080_0000 != 0 || mantissa == 0 {
+            return None;
+        }
+        // the target, big-endian
+        let mut target = [0u8; 33];
+        let bytes = mantissa.to_be_bytes();
+        for (k, &byte) in bytes[1..].iter().enumerate() {
+            // byte k of the 3-byte mantissa sits at 256^(exponent - 1 - k)
+            let power = exponent as i64 - 1 - k as i64;
+            if power < 0 {
+                continue;
+            }
+            if power >= 32 {
+                if byte != 0 {
+                    return None;
+                }
+                continue;
+            }
+            target[32 - power as usize] = byte;
+        }
+        let target = &target[1..];
+        let bit_length = target
+            .iter()
+            .position(|&b| b != 0)
+            .map(|i| (32 - i) * 8 - target[i].leading_zeros() as usize)
+            .unwrap_or(0);
+        if bit_length == 0 || 256 - bit_length < bias as usize {
+            return None;
+        }
+        // shift left by bias
+        let mut shifted = [0u8; 32];
+        let (byte_shift, bit_shift) = (bias as usize / 8, bias as u32 % 8);
+        for i in 0..32 {
+            let src = i + byte_shift;
+            if src < 32 {
+                let hi = (target[src] as u16) << bit_shift;
+                let lo = if src + 1 < 32 { (target[src + 1] as u16) >> (8 - bit_shift) } else { 0 };
+                shifted[i] = ((hi | if bit_shift == 0 { 0 } else { lo }) & 0xff) as u8;
+            }
+        }
+        let mut hash_be = *hash;
+        hash_be.reverse();
+        Some(hash_be <= shifted)
+    }
+
+    /// The parent chain block the auxiliary proof-of-work of `header` commits to.
+    pub fn parent_block(header: &Header, aux: &AuxPow, network: Network) -> ParentBlock {
+        // the committed block template
+        let template = Header {
+            version: bitcoin::block::Version::from_consensus(aux.commit_version),
+            prev_blockhash: header.prev_blockhash,
+            merkle_root: TxMerkleNode::from_byte_array(aux.commit_merkle_root),
+            time: aux.commit_time,
+            bits: CompactTarget::from_consensus(aux.commit_bits),
+            nonce: aux.commit_nonce,
+        };
+        let mut hash = template.block_hash().to_byte_array();
+
+        // the block withholding secret, committed to by its hash
+        let mut secret = sha256d::Hash::engine();
+        secret.input(&aux.secret_lo.to_le_bytes());
+        secret.input(&aux.secret_hi.to_le_bytes());
+        hash = midstate_pair(&hash, &sha256d::Hash::from_engine(secret).to_byte_array());
+
+        // up the parent's Merkle hash map of commitments
+        let mut valid = true;
+        hash = match merkle_map_root(&hash, &aux.commit_branch, &aux_pow_path(network)) {
+            Some(root) => root,
+            None => {
+                valid = false;
+                [0u8; 32]
+            }
+        };
+
+        // the parent's block-final transaction, from its midstate: the commitment root, the
+        // commitment identifier and the lock time
+        let length = aux.midstate_length as usize;
+        let mut engine = sha256::HashEngine::from_midstate(
+            sha256::Midstate::from_byte_array(aux.midstate_hash),
+            length - length % 64,
+        );
+        engine.input(&aux.midstate_buffer[..(length % 64).min(aux.midstate_buffer.len())]);
+        engine.input(&hash);
+        engine.input(&[0x4b, 0x4a, 0x49, 0x48]);
+        engine.input(&aux.aux_lock_time.to_le_bytes());
+        let once = sha256::Hash::from_engine(engine);
+        hash = sha256::Hash::hash(once.as_byte_array()).to_byte_array();
+
+        // the parent's Merkle root, from the block-final transaction's branch
+        let (path, mask) = merkle_path_and_mask(aux.aux_branch.len(), aux.aux_num_txns.wrapping_sub(1));
+        let (merkle_root, mutated) = stable_merkle_root(&hash, &aux.aux_branch, path, mask);
+        valid &= !mutated;
+
+        let parent = Header {
+            version: bitcoin::block::Version::from_consensus(aux.aux_version),
+            prev_blockhash: aux.aux_prev_blockhash,
+            merkle_root: TxMerkleNode::from_byte_array(merkle_root),
+            time: header.time,
+            bits: CompactTarget::from_consensus(aux.aux_bits),
+            nonce: aux.aux_nonce,
+        };
+        let hash = parent.block_hash();
+        // the bias is the commitment nonce's low byte (CBlockHeader::GetBias)
+        let bias = (aux.commit_nonce & 0xff) as u8;
+        let meets_target =
+            valid && meets(hash.as_byte_array(), aux.commit_bits, bias).unwrap_or(false);
+        let is_parent_chain_block =
+            meets_target && meets(hash.as_byte_array(), aux.aux_bits, 0).unwrap_or(false);
+
+        ParentBlock {
+            hash,
+            prev_blockhash: parent.prev_blockhash,
+            version: aux.aux_version,
+            merkle_root: parent.merkle_root,
+            time: parent.time,
+            bits: parent.bits,
+            nonce: parent.nonce,
+            tx_count: aux.aux_num_txns,
+            meets_target,
+            is_parent_chain_block,
+        }
+    }
+}
+
 /// Freicoin's witness programs and their addresses: versions 0 to 30 on the 31 single-byte opcodes
 /// that could start a script before the protocol cleanup, an optional shard prefix and extension
 /// output after the program (CScript::IsWitnessProgram in script/script.cpp), every version's
@@ -633,6 +933,25 @@ mod tests {
         let invalid_shard = Vec::<u8>::from_hex(&format!("0014{}0105", p20)).unwrap();
         assert_eq!(witness::script_type(&invalid_shard), None);
         assert_eq!(witness::address(&invalid_shard, Network::Bitcoin), None);
+    }
+
+    #[test]
+    fn merge_mined_parents() {
+        let mut merge_mined = 0;
+        for f in BLOCKS {
+            let raw = Vec::<u8>::from_hex(f.header).unwrap();
+            let (header, aux) = BlockHeader::decode_with_aux_pow(&mut raw.as_slice()).unwrap();
+            let Some(mut aux) = aux else { continue };
+            merge_mined += 1;
+            // the reconstruction consensus checks meets the auxiliary target
+            let parent = aux_pow::parent_block(&header, &aux, Network::Bitcoin);
+            assert!(parent.meets_target, "{}: parent {}", f.hash, parent.hash);
+            assert_eq!(parent.prev_blockhash, aux.aux_prev_blockhash);
+            // and one from altered data does not
+            aux.aux_nonce ^= 1;
+            assert!(!aux_pow::parent_block(&header, &aux, Network::Bitcoin).meets_target);
+        }
+        assert!(merge_mined > 0);
     }
 
     #[test]

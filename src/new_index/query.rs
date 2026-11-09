@@ -202,6 +202,34 @@ impl Query {
         confirmed_txids.chain(mempool_txids).collect()
     }
 
+    /// Freicoin: the parent chain block of a merge-mined block, from the node's header with its
+    /// auxiliary proof-of-work; None for a block that is not merge-mined, or on the node's error.
+    /// Cached, a block's parent never changing.
+    #[cfg(not(feature = "liquid"))]
+    pub fn parent_block(
+        &self,
+        hash: &crate::chain::BlockHash,
+    ) -> Option<crate::freicoin::aux_pow::ParentBlock> {
+        use crate::freicoin::aux_pow::{parent_block, ParentBlock};
+        use std::sync::OnceLock;
+        type Cache = Mutex<HashMap<crate::chain::BlockHash, Option<ParentBlock>>>;
+        static CACHE: OnceLock<Cache> = OnceLock::new();
+        let cache = CACHE.get_or_init(Default::default);
+        if let Some(parent) = cache.lock().unwrap().get(hash) {
+            return parent.clone();
+        }
+        let raw = self.daemon.getblockheader_raw(hash).ok()?;
+        let (header, aux) =
+            crate::chain::BlockHeader::decode_with_aux_pow(&mut raw.as_slice()).ok()?;
+        let parent = aux.map(|aux| parent_block(&header, &aux, self.config.network_type));
+        let mut cache = cache.lock().unwrap();
+        if cache.len() >= 100_000 {
+            cache.clear();
+        }
+        cache.insert(*hash, parent.clone());
+        parent
+    }
+
     pub fn stats(&self, scripthash: &[u8]) -> Result<(ScriptStats, ScriptStats)> {
         Ok((
             self.chain.stats(scripthash)?,
