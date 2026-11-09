@@ -1,3 +1,5 @@
+> **Freicoin:** this branch adapts it to Freicoin, see [FREICOIN.md](FREICOIN.md).
+
 # Esplora - Electrs backend API
 
 A block chain index engine and HTTP API written in Rust based on [romanz/electrs](https://github.com/romanz/electrs).
