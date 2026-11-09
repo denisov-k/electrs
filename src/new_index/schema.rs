@@ -1508,6 +1508,12 @@ impl ChainQuery {
         lookup_txos(&self.store.txstore_db, outpoints)
     }
 
+    /// Freicoin: the reference heights of confirmed outputs, which their values are denominated at.
+    pub fn lookup_refheights(&self, outpoints: BTreeSet<OutPoint>) -> HashMap<OutPoint, u32> {
+        let _timer = self.start_timer("lookup_refheights");
+        lookup_refheights(&self.store.txstore_db, outpoints)
+    }
+
     pub fn lookup_spend(&self, outpoint: &OutPoint) -> Option<SpendingInput> {
         let _timer = self.start_timer("lookup_spend");
         let edge = TxEdgeValue::from_bytes(&self.store.history_db.get(&TxEdgeRow::key(outpoint))?);
@@ -1687,7 +1693,7 @@ fn add_transaction(txid: Txid, tx: &Transaction, rows: &mut Vec<DBRow>, iconfig:
     let txid = full_hash(&txid[..]);
     for (txo_index, txo) in tx.output.iter().enumerate() {
         if is_spendable(txo) {
-            rows.push(TxOutRow::new(&txid, txo_index, txo).into_row());
+            rows.push(TxOutRow::new(&txid, txo_index, txo, tx.lock_height).into_row());
         }
 
         if iconfig.address_search {
@@ -1719,8 +1725,7 @@ fn lookup_txos(txstore_db: &DB, outpoints: BTreeSet<OutPoint>) -> Result<HashMap
         .zip(outpoints)
         .map(|(res, outpoint)| {
             let txo = res?.ok_or_else(|| ErrorKind::MissingTxo(outpoint.to_string()))?;
-            let txo = deserialize(&txo).chain_err(|| "failed to parse TxOut")?;
-            Ok((outpoint, txo))
+            Ok((outpoint, TxOutRow::parse_value(&txo)?.0))
         })
         .collect()
 }
@@ -1728,7 +1733,21 @@ fn lookup_txos(txstore_db: &DB, outpoints: BTreeSet<OutPoint>) -> Result<HashMap
 fn lookup_txo(txstore_db: &DB, outpoint: &OutPoint) -> Option<TxOut> {
     txstore_db
         .get(&TxOutRow::key(&outpoint))
-        .map(|val| deserialize(&val).expect("failed to parse TxOut"))
+        .map(|val| TxOutRow::parse_value(&val).expect("failed to parse TxOut").0)
+}
+
+/// The reference heights of the outputs found, skipping those that are not.
+fn lookup_refheights(txstore_db: &DB, outpoints: BTreeSet<OutPoint>) -> HashMap<OutPoint, u32> {
+    let keys = outpoints.iter().map(TxOutRow::key).collect::<Vec<_>>();
+    txstore_db
+        .multi_get(keys)
+        .into_iter()
+        .zip(outpoints)
+        .filter_map(|(res, outpoint)| {
+            let val = res.ok()??;
+            Some((outpoint, TxOutRow::parse_value(&val).ok()?.1))
+        })
+        .collect()
 }
 
 pub fn lookup_confirmations(
@@ -1950,19 +1969,31 @@ struct TxOutKey {
 
 struct TxOutRow {
     key: TxOutKey,
-    value: Bytes, // serialized output
+    value: Bytes, // serialized output, then (Freicoin) its reference height, u32 little-endian
 }
 
 impl TxOutRow {
-    fn new(txid: &FullHash, vout: usize, txout: &TxOut) -> TxOutRow {
+    fn new(txid: &FullHash, vout: usize, txout: &TxOut, refheight: u32) -> TxOutRow {
+        let mut value = serialize(txout);
+        value.extend_from_slice(&refheight.to_le_bytes());
         TxOutRow {
             key: TxOutKey {
                 code: b'O',
                 txid: *txid,
                 vout: vout as u32,
             },
-            value: serialize(txout),
+            value,
         }
+    }
+
+    /// The output and its reference height (the `lock_height` of the transaction that created it).
+    fn parse_value(value: &[u8]) -> Result<(TxOut, u32)> {
+        let (txo, len) = bitcoin::consensus::encode::deserialize_partial::<TxOut>(value)
+            .chain_err(|| "failed to parse TxOut")?;
+        let refheight = value
+            .get(len..len + 4)
+            .ok_or_else(|| Error::from("missing TxOut reference height"))?;
+        Ok((txo, u32::from_le_bytes(refheight.try_into().unwrap())))
     }
     fn key(outpoint: &OutPoint) -> Bytes {
         bincode::serialize_little(&TxOutKey {
@@ -2425,12 +2456,14 @@ mod tests {
         let address = tester.newaddress()?;
         let funding_txid = tester.send_multi(&address, bitcoin::Amount::ONE_BTC, 2)?;
         tester.mine()?;
+        // Freicoin: a spend's lock_height is no lower than its inputs'
+        let lock_height: u32 = tester.node_client().call("getblockcount", &[])?;
 
         let spend = |vout: u32| -> common::Result<Txid> {
             let tx = Transaction {
                 version: bitcoin::transaction::Version::TWO,
                 lock_time: bitcoin::absolute::LockTime::ZERO,
-                lock_height: 0,
+                lock_height,
                 input: vec![bitcoin::TxIn {
                     previous_output: OutPoint::new(funding_txid, vout),
                     ..Default::default()

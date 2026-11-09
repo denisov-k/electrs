@@ -421,12 +421,14 @@ impl Mempool {
 
         // Lookup spent prevouts that were funded within the same `add` batch
         let mut txos = HashMap::new();
-        let remain_prevouts = spent_prevouts
+        let mut refheights = HashMap::new();
+        let remain_prevouts: BTreeSet<OutPoint> = spent_prevouts
             .into_iter()
             .filter(|prevout| {
                 if let Some(prevtx) = txs_map.get(&prevout.txid) {
                     if let Some(out) = prevtx.output.get(prevout.vout as usize) {
                         txos.insert(prevout.clone(), out.clone());
+                        refheights.insert(prevout.clone(), prevtx.lock_height);
                         // remove from the list of remaining `prevouts`
                         return false;
                     }
@@ -437,6 +439,7 @@ impl Mempool {
 
         // Lookup remaining spent prevouts in mempool & on-chain
         // Fails if any are missing.
+        refheights.extend(self.lookup_refheights(remain_prevouts.clone()));
         txos.extend(self.lookup_txos(remain_prevouts)?);
 
         // Add to txstore and indexes
@@ -449,7 +452,7 @@ impl Mempool {
             let mut tx_scripthashes = Vec::with_capacity(tx.input.len() + tx.output.len()); // best-effort capacity hint
 
             // Get feeinfo for caching and recent tx overview
-            let feeinfo = TxFeeInfo::new(&tx, &prevouts, self.config.network_type);
+            let feeinfo = TxFeeInfo::new(&tx, &prevouts, &refheights, self.config.network_type);
 
             // recent is an ArrayDeque that automatically evicts the oldest elements
             self.recent.push_front(TxOverview {
@@ -528,6 +531,20 @@ impl Mempool {
         }
 
         Ok(())
+    }
+
+    /// Freicoin: the reference heights of outputs in the mempool or the chain, skipping those
+    /// found in neither.
+    pub fn lookup_refheights(&self, outpoints: BTreeSet<OutPoint>) -> HashMap<OutPoint, u32> {
+        let (mut found, remain): (HashMap<_, _>, BTreeSet<_>) =
+            outpoints.into_iter().partition_map(|outpoint| {
+                match self.txstore.get(&outpoint.txid) {
+                    Some(tx) => Either::Left((outpoint, tx.lock_height)),
+                    None => Either::Right(outpoint),
+                }
+            });
+        found.extend(self.chain.lookup_refheights(remain));
+        found
     }
 
     /// Look up a local mempool output without chain or daemon IO.

@@ -283,10 +283,12 @@ impl TestRunner {
             script_pubkey: self.newaddress()?.script_pubkey(),
         });
 
+        // Freicoin: the lock_height is no lower than the input's
+        let lock_height: u32 = self.node_client().call("getblockcount", &[])?;
         let tx = bitcoin::Transaction {
             version: bitcoin::transaction::Version::TWO,
             lock_time: bitcoin::absolute::LockTime::ZERO,
-            lock_height: 0,
+            lock_height,
             input: vec![input],
             output: outputs,
         };

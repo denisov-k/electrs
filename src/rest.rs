@@ -144,6 +144,8 @@ struct TransactionValue {
     txid: Txid,
     version: u32,
     locktime: u32,
+    /// Freicoin: the reference height its output values are denominated at
+    lock_height: u32,
     vin: Vec<TxInValue>,
     vout: Vec<TxOutValue>,
     size: u32,
@@ -166,6 +168,7 @@ impl TransactionValue {
         tx: Transaction,
         blockid: Option<BlockId>,
         txos: &HashMap<OutPoint, TxOut>,
+        refheights: &HashMap<OutPoint, u32>,
         config: &Config,
     ) -> Self {
         let prevouts = extract_tx_prevouts(&tx, &txos, true);
@@ -183,7 +186,7 @@ impl TransactionValue {
             .map(|txout| TxOutValue::new(txout, config))
             .collect();
 
-        let fee = get_tx_fee(&tx, &prevouts, config.network_type);
+        let fee = get_tx_fee(&tx, &prevouts, refheights, config.network_type);
 
         let weight = tx.weight();
         #[cfg(not(feature = "liquid"))] // rust-bitcoin has a wrapper Weight type
@@ -196,6 +199,7 @@ impl TransactionValue {
             #[cfg(feature = "liquid")]
             version: tx.version as u32,
             locktime: tx.lock_time.to_consensus_u32(),
+            lock_height: tx.lock_height,
             vin: vins,
             vout: vouts,
             size: tx.total_size() as u32,
@@ -508,13 +512,15 @@ fn ttl_by_confirmations(best_height: usize, height: usize) -> u32 {
 struct MempoolTxs {
     txs: Vec<(Transaction, Option<BlockId>)>,
     prevouts: HashMap<OutPoint, TxOut>,
+    /// Freicoin: the captured prevouts' reference heights
+    refheights: HashMap<OutPoint, u32>,
 }
 
 impl MempoolTxs {
     fn capture(query: &Query, select: impl FnOnce(&Mempool) -> Vec<Transaction>) -> Self {
         let mempool = query.mempool();
         let txs: Vec<_> = select(&mempool).into_iter().map(|tx| (tx, None)).collect();
-        let prevouts = txs
+        let prevouts: HashMap<OutPoint, TxOut> = txs
             .iter()
             .flat_map(|(tx, _)| &tx.input)
             .filter(|txin| has_prevout(txin))
@@ -524,11 +530,17 @@ impl MempoolTxs {
                     .map(|txout| (txin.previous_output, txout))
             })
             .collect();
-        Self { txs, prevouts }
+        let refheights = mempool.lookup_refheights(prevouts.keys().copied().collect());
+        Self {
+            txs,
+            prevouts,
+            refheights,
+        }
     }
 
     fn prepare(self, query: &Query, config: &Config) -> Result<Vec<TransactionValue>, HttpError> {
         let mut prevouts = self.prevouts;
+        let refheights = self.refheights;
         let confirmed_prevouts: BTreeSet<_> = self
             .txs
             .iter()
@@ -538,7 +550,9 @@ impl MempoolTxs {
             .map(|txin| txin.previous_output)
             .collect();
         prepare_txs(
+            query,
             self.txs,
+            refheights,
             |mut outpoints| {
                 outpoints.retain(|outpoint| !prevouts.contains_key(outpoint));
                 prevouts.extend(
@@ -591,7 +605,9 @@ fn prepare_tx(
             .map_err(HttpError::lookup)?;
         let ttl = ttl_by_depth(blockid.map(|b| b.height), query);
         let tx = prepare_txs(
+            query,
             vec![(tx, blockid)],
+            HashMap::new(),
             |outpoints| {
                 query
                     .chain()
@@ -634,15 +650,19 @@ fn prepare_captured_tx(
     Ok((snapshot.prepare(query, config)?.remove(0), ttl))
 }
 
+/// `refheights` has the reference heights of mempool prevouts, captured with them; those of
+/// confirmed prevouts are looked up in the chain, never the mempool, whose lock this must not take.
 fn prepare_txs<F>(
+    query: &Query,
     txs: Vec<(Transaction, Option<BlockId>)>,
+    mut refheights: HashMap<OutPoint, u32>,
     lookup_txos: F,
     config: &Config,
 ) -> Result<Vec<TransactionValue>, HttpError>
 where
     F: FnOnce(BTreeSet<OutPoint>) -> Result<HashMap<OutPoint, TxOut>, HttpError>,
 {
-    let outpoints = txs
+    let outpoints: BTreeSet<OutPoint> = txs
         .iter()
         .flat_map(|(tx, _)| {
             tx.input
@@ -652,11 +672,17 @@ where
         })
         .collect();
 
+    let missing = outpoints
+        .iter()
+        .filter(|outpoint| !refheights.contains_key(outpoint))
+        .copied()
+        .collect();
+    refheights.extend(query.chain().lookup_refheights(missing));
     let prevouts = lookup_txos(outpoints)?;
 
     Ok(txs
         .into_iter()
-        .map(|(tx, blockid)| TransactionValue::new(tx, blockid, &prevouts, config))
+        .map(|(tx, blockid)| TransactionValue::new(tx, blockid, &prevouts, &refheights, config))
         .collect())
 }
 
@@ -1373,7 +1399,9 @@ fn handle_blocking_request(
 
             json_response(
                 prepare_txs(
+                    query,
                     txs,
+                    HashMap::new(),
                     |outpoints| {
                         query
                             .chain()
@@ -1476,7 +1504,9 @@ fn handle_blocking_request(
 
             json_response(
                 prepare_txs(
+                    query,
                     txs,
+                    HashMap::new(),
                     |outpoints| {
                         query
                             .chain()
@@ -1804,7 +1834,9 @@ fn handle_blocking_request(
 
             json_response(
                 prepare_txs(
+                    query,
                     txs,
+                    HashMap::new(),
                     |outpoints| {
                         query
                             .chain()

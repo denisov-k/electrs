@@ -115,6 +115,7 @@ fn prevout_lookup_survives_ancestor_eviction() -> Result<()> {
     let stale = MempoolTxs {
         txs: vec![(child_tx, None)],
         prevouts: HashMap::new(),
+        refheights: HashMap::new(),
     };
     let error = stale.prepare(&query, &config).err().unwrap();
     assert_eq!(error.0, StatusCode::NOT_FOUND);

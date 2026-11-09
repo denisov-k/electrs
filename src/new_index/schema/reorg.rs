@@ -571,8 +571,8 @@ impl Indexer {
         {
             match raw.chain_err(|| "failed looking up prevouts for history undo")? {
                 Some(raw) => {
-                    let output =
-                        deserialize(&raw).chain_err(|| "invalid prevout during history undo")?;
+                    let (output, _refheight) = super::TxOutRow::parse_value(&raw)
+                        .chain_err(|| "invalid prevout during history undo")?;
                     prevouts.insert(outpoint, output);
                 }
                 None => {
@@ -1179,6 +1179,7 @@ mod tests {
                             &full_hash(&outpoint.txid[..]),
                             outpoint.vout as usize,
                             output,
+                            0,
                         )
                         .into_row()
                     })
