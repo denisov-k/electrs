@@ -131,10 +131,13 @@ impl TryFrom<Opcode> for WitnessVersion {
     type Error = TryFromError;
 
     fn try_from(opcode: Opcode) -> Result<Self, Self::Error> {
+        // Freicoin: OP_0 is version 0, OP_1NEGATE version 1, and OP_1 to OP_15 versions 2 to 16
+        // (the opcodes past them, to version 30, have no WitnessVersion).
         match opcode.to_u8() {
             0 => Ok(WitnessVersion::V0),
-            version if version >= OP_PUSHNUM_1.to_u8() && version <= OP_PUSHNUM_16.to_u8() =>
-                WitnessVersion::try_from(version - OP_PUSHNUM_1.to_u8() + 1),
+            version if version == OP_PUSHNUM_NEG1.to_u8() => Ok(WitnessVersion::V1),
+            version if version >= OP_PUSHNUM_1.to_u8() && version < OP_PUSHNUM_16.to_u8() =>
+                WitnessVersion::try_from(version - OP_PUSHNUM_1.to_u8() + 2),
             invalid => Err(TryFromError { invalid }),
         }
     }
@@ -160,7 +163,9 @@ impl From<WitnessVersion> for Opcode {
     fn from(version: WitnessVersion) -> Opcode {
         match version {
             WitnessVersion::V0 => OP_PUSHBYTES_0,
-            no => Opcode::from(OP_PUSHNUM_1.to_u8() + no.to_num() - 1),
+            // Freicoin: OP_1NEGATE is version 1, OP_1 version 2, and so on
+            WitnessVersion::V1 => OP_PUSHNUM_NEG1,
+            no => Opcode::from(OP_PUSHNUM_1.to_u8() + no.to_num() - 2),
         }
     }
 }

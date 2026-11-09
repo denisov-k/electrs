@@ -485,4 +485,40 @@ mod tests {
             assert_eq!(tx_fee(&tx, prevouts(), adjustment), fee);
         }
     }
+
+    /// Mainnet addresses and their scripts, from freicoind's validateaddress and decodescript:
+    /// every witness version takes the Bech32m checksum, and OP_1 is witness version 2.
+    #[test]
+    fn mainnet_addresses() {
+        use bitcoin::{Address, Network as BNetwork, ScriptBuf};
+        use std::str::FromStr;
+        let vectors = [
+            ("1FgMSH5nUEieiWyX9YZuFvvUihWtJ2bRrZ", "76a914a1030add7d227a0a43d10696305bb5574e5ef59288ac"),
+            ("fc1qq9kpkhf43g7x8wrytj4up0s47uvkzknvxa3lkn", "0014016c1b5d358a3c63b8645cabc0be15f719615a6c"),
+            (
+                "fc1q424242424242424242424242424242424242424242424242424q9ejjz5",
+                "0020aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            (
+                "fc1zhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwasf6h4m0",
+                "5120bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ),
+        ];
+        for (address, script) in vectors {
+            let parsed = Address::from_str(address)
+                .unwrap()
+                .require_network(BNetwork::Bitcoin)
+                .unwrap();
+            assert_eq!(parsed.script_pubkey().to_hex_string(), script, "{}", address);
+            let script = ScriptBuf::from_hex(script).unwrap();
+            let shown = Address::from_script(&script, BNetwork::Bitcoin).unwrap();
+            assert_eq!(shown.to_string(), address);
+        }
+        // the same version 0 program under Bitcoin's Bech32 checksum is no Freicoin address
+        let hrp = bitcoin::bech32::Hrp::parse("fc").unwrap();
+        let program = Vec::<u8>::from_hex("016c1b5d358a3c63b8645cabc0be15f719615a6c").unwrap();
+        let bech32 = bitcoin::bech32::segwit::encode_v0(hrp, &program).unwrap();
+        assert!(bech32.starts_with("fc1q") && bech32 != vectors[1].0);
+        assert!(Address::from_str(&bech32).is_err());
+    }
 }

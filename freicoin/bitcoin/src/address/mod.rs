@@ -173,13 +173,22 @@ impl fmt::Display for AddressInner {
             Segwit { program, hrp } => {
                 let hrp = hrp.to_hrp();
                 let version = program.version().to_fe();
-                let program = program.program().as_ref();
+                let program: &[u8] = program.program().as_bytes();
 
-                if fmt.alternate() {
-                    bech32::segwit::encode_upper_to_fmt_unchecked(fmt, hrp, version, program)
-                } else {
-                    bech32::segwit::encode_lower_to_fmt_unchecked(fmt, hrp, version, program)
+                // Freicoin: every witness version, 0 included, takes the Bech32m checksum.
+                use bech32::primitives::iter::{ByteIterExt, Fe32IterExt};
+                use fmt::Write as _;
+                let chars = program
+                    .iter()
+                    .copied()
+                    .bytes_to_fes()
+                    .with_checksum::<bech32::Bech32m>(&hrp)
+                    .with_witness_version(version)
+                    .chars();
+                for c in chars {
+                    fmt.write_char(if fmt.alternate() { char::to_ascii_uppercase(&c) } else { c })?;
                 }
+                Ok(())
             }
         }
     }
@@ -822,12 +831,17 @@ impl FromStr for Address<NetworkUnchecked> {
     type Err = ParseError;
 
     fn from_str(s: &str) -> Result<Address<NetworkUnchecked>, ParseError> {
-        if let Ok((hrp, witness_version, data)) = bech32::segwit::decode(s) {
-            let version = WitnessVersion::try_from(witness_version)?;
+        // Freicoin: every witness version, 0 included, takes the Bech32m checksum.
+        let segwit = bech32::primitives::decode::CheckedHrpstring::new::<bech32::Bech32m>(s)
+            .ok()
+            .and_then(|checked| checked.validate_segwit().ok());
+        if let Some(segwit) = segwit {
+            let version = WitnessVersion::try_from(segwit.witness_version())?;
+            let data: Vec<u8> = segwit.byte_iter().collect();
             let program = WitnessProgram::new(version, &data)
                 .expect("bech32 guarantees valid program length for witness");
 
-            let hrp = KnownHrp::from_hrp(hrp)?;
+            let hrp = KnownHrp::from_hrp(segwit.hrp())?;
             let inner = AddressInner::Segwit { program, hrp };
             return Ok(Address(inner, PhantomData));
         }
