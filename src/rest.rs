@@ -372,6 +372,8 @@ impl TxOutValue {
             "v1_p2tr"
         } else if script.is_op_return() {
             "provably_unspendable"
+        } else if is_witness_commitment(script) {
+            "witness_commitment"
         } else {
             "unknown"
         };
@@ -395,6 +397,17 @@ impl TxOutValue {
             pegout,
         }
     }
+}
+
+/// Freicoin: the witness commitment output of a block-final transaction.
+#[cfg(not(feature = "liquid"))]
+fn is_witness_commitment(script: &Script) -> bool {
+    crate::freicoin::is_witness_commitment(script.as_bytes())
+}
+
+#[cfg(feature = "liquid")]
+fn is_witness_commitment(_script: &Script) -> bool {
+    false
 }
 
 #[derive(Serialize)]

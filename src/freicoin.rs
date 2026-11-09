@@ -116,6 +116,20 @@ pub fn value_at(value: u64, refheight: u32, height: u32) -> u64 {
     time_adjust_value_forward(value as i64, height - refheight) as u64
 }
 
+/// Whether an output script is the witness commitment of a block-final transaction: a single push
+/// of a path byte, the 32-byte witness Merkle root and the magic "KJIH" (4b4a4948), possibly more
+/// (consensus/validation.h, consensus/merkle.cpp).
+pub fn is_witness_commitment(script: &[u8]) -> bool {
+    match script.split_first() {
+        Some((&len, data)) => {
+            (37..=75).contains(&len)
+                && data.len() == len as usize
+                && data[33..37] == [0x4b, 0x4a, 0x49, 0x48]
+        }
+        None => false,
+    }
+}
+
 /// Mainnet heights of the soft forks that each dropped a kria credited to every input on top of
 /// its adjusted value: the truncation of fractional inputs, then the ALU demurrage arithmetic
 /// (`truncate_inputs_activation_height` and `alu_activation_height` in kernel/chainparams.cpp).
@@ -440,6 +454,23 @@ mod tests {
             // getblock's fee, which leaves out the per-input adjustment of the early chain
             assert_eq!(tx_fee(&tx, prevouts, 0), f.fee, "{}", f.txid);
         }
+    }
+
+    #[test]
+    fn witness_commitments() {
+        // the block-final output of block 497521
+        let script = Vec::<u8>::from_hex(
+            "250196819b2df5f13c7a3522d44d9360472b0e168dbeba6c1929549e66b08eebcf834b4a4948",
+        )
+        .unwrap();
+        assert!(is_witness_commitment(&script));
+        assert!(!is_witness_commitment(&script[..script.len() - 1]));
+        let mut other = script.clone();
+        other[34] ^= 1;
+        assert!(!is_witness_commitment(&other));
+        let p2pkh = Vec::<u8>::from_hex("76a914a1030add7d227a0a43d10696305bb5574e5ef59288ac").unwrap();
+        assert!(!is_witness_commitment(&p2pkh));
+        assert!(!is_witness_commitment(&[]));
     }
 
     #[test]
