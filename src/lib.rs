@@ -30,6 +30,8 @@ pub mod config;
 pub mod daemon;
 pub mod electrum;
 pub mod errors;
+#[cfg(not(feature = "liquid"))]
+pub mod freicoin;
 pub mod metrics;
 pub mod new_index;
 pub mod rest;
