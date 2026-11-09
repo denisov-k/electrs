@@ -384,10 +384,11 @@ fn fetch_block_template(daemon: &Daemon, network: Network) -> Result<FetchedBloc
 }
 
 #[cfg(not(feature = "liquid"))]
+/// Freicoin: its finaltx and auxpow deployments need the client's explicit support too.
 fn block_template_rules(network: Network) -> &'static [&'static str] {
     match network {
-        Network::Signet => &["segwit", "signet"],
-        _ => &["segwit"],
+        Network::Signet => &["segwit", "signet", "finaltx", "auxpow"],
+        _ => &["segwit", "finaltx", "auxpow"],
     }
 }
 
