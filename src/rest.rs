@@ -403,8 +403,16 @@ struct UtxoValue {
     vout: u32,
     status: TransactionStatus,
 
+    /// Freicoin: the value at `refheight`, the `lock_height` of the transaction that created it
     #[cfg(not(feature = "liquid"))]
     value: u64,
+
+    #[cfg(not(feature = "liquid"))]
+    refheight: u32,
+
+    /// Freicoin: the value at the next block's height, demurrage taken
+    #[cfg(not(feature = "liquid"))]
+    present_value: u64,
 
     #[cfg(feature = "liquid")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -435,8 +443,10 @@ struct UtxoValue {
     #[serde(skip_serializing_if = "Option::is_none")]
     range_proof: Option<zkp::RangeProof>,
 }
-impl From<Utxo> for UtxoValue {
-    fn from(utxo: Utxo) -> Self {
+impl UtxoValue {
+    /// `refheight` is the utxo's reference height, `height` the one its present value is at.
+    #[allow(unused_variables)]
+    fn new(utxo: Utxo, refheight: u32, height: u32) -> Self {
         UtxoValue {
             txid: utxo.txid,
             vout: utxo.vout,
@@ -444,6 +454,10 @@ impl From<Utxo> for UtxoValue {
 
             #[cfg(not(feature = "liquid"))]
             value: utxo.value,
+            #[cfg(not(feature = "liquid"))]
+            refheight,
+            #[cfg(not(feature = "liquid"))]
+            present_value: crate::freicoin::value_at(utxo.value, refheight, height),
 
             #[cfg(feature = "liquid")]
             value: utxo.value.explicit(),
@@ -1423,12 +1437,20 @@ fn handle_blocking_request(
             ));
             let script_hash = to_scripthash(script_type, script_str, config.network_type)?;
             let stats = query.stats(&script_hash[..])?;
+            #[allow(unused_mut)]
+            let mut value = json!({
+                *script_type: script_str,
+                "chain_stats": stats.0,
+                "mempool_stats": stats.1,
+            });
+            // Freicoin: the stats' sums are face values at differing reference heights, which
+            // demurrage makes no balance of; this is it, null past the utxo limit.
+            #[cfg(not(feature = "liquid"))]
+            {
+                value["present_value"] = json!(query.present_value(&script_hash[..])?);
+            }
             json_response(
-                json!({
-                    *script_type: script_str,
-                    "chain_stats": stats.0,
-                    "mempool_stats": stats.1,
-                }),
+                value,
                 TTL_SHORT,
             )
         }
@@ -1571,10 +1593,18 @@ fn handle_blocking_request(
                 "scripthash/:scripthash/utxo",
             ));
             let script_hash = to_scripthash(script_type, script_str, config.network_type)?;
-            let utxos: Vec<UtxoValue> = query
-                .utxo(&script_hash[..])?
+            let utxos = query.utxo(&script_hash[..])?;
+            let height = query.present_height();
+            let refheights = query.utxo_refheights(&utxos);
+            let utxos: Vec<UtxoValue> = utxos
                 .into_iter()
-                .map(UtxoValue::from)
+                .map(|utxo| {
+                    let refheight = refheights
+                        .get(&OutPoint::from(&utxo))
+                        .copied()
+                        .unwrap_or(height);
+                    UtxoValue::new(utxo, refheight, height)
+                })
                 .collect();
             // XXX paging?
             json_response(utxos, TTL_SHORT)

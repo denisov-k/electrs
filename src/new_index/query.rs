@@ -31,6 +31,17 @@ const CONF_TARGETS: [u16; 28] = [
     16u16, 17u16, 18u16, 19u16, 20u16, 21u16, 22u16, 23u16, 24u16, 25u16, 144u16, 504u16, 1008u16,
 ];
 
+/// Freicoin: what the unspent outputs of an address or script are worth at `height`, its
+/// confirmed ones (whether or not the mempool spends them) and those spendable counting the
+/// mempool's spends and outputs.
+#[cfg(not(feature = "liquid"))]
+#[derive(Serialize, Debug, PartialEq)]
+pub struct PresentValue {
+    pub height: u32,
+    pub confirmed: u64,
+    pub spendable: u64,
+}
+
 pub struct Query {
     chain: Arc<ChainQuery>, // TODO: should be used as read-only
     mempool: Arc<RwLock<Mempool>>,
@@ -196,6 +207,60 @@ impl Query {
             self.chain.stats(scripthash)?,
             self.mempool().stats(scripthash)?,
         ))
+    }
+
+    /// Freicoin: the height that present values are at, the next block's, where an output spent
+    /// now would be.
+    pub fn present_height(&self) -> u32 {
+        self.chain.best_height() as u32 + 1
+    }
+
+    /// Freicoin: the reference heights of `utxos`, which their values are denominated at.
+    pub fn utxo_refheights(&self, utxos: &[Utxo]) -> HashMap<OutPoint, u32> {
+        self.mempool()
+            .lookup_refheights(utxos.iter().map(OutPoint::from).collect())
+    }
+
+    /// Freicoin: the present value (at [`Self::present_height`]) of the unspent outputs of
+    /// `scripthash`, demurrage taken; `None` if it has more than the utxo limit of them.
+    #[cfg(not(feature = "liquid"))]
+    pub fn present_value(&self, scripthash: &[u8]) -> Result<Option<PresentValue>> {
+        let chain_utxos = match self.chain.utxo(scripthash, self.config.utxos_limit) {
+            Err(e) if matches!(e.kind(), ErrorKind::TooManyUtxos) => return Ok(None),
+            res => res?,
+        };
+        let mempool = self.mempool();
+        let mempool_utxos = mempool.utxo(scripthash)?;
+        if chain_utxos.len() + mempool_utxos.len() > self.config.utxos_limit {
+            return Ok(None);
+        }
+        let height = self.present_height();
+        let refheights = mempool.lookup_refheights(
+            chain_utxos
+                .iter()
+                .chain(&mempool_utxos)
+                .map(OutPoint::from)
+                .collect(),
+        );
+        let value = |utxo: &Utxo| {
+            let refheight = refheights
+                .get(&OutPoint::from(utxo))
+                .copied()
+                .unwrap_or(height);
+            crate::freicoin::value_at(utxo.value, refheight, height)
+        };
+        let confirmed = chain_utxos.iter().map(value).sum();
+        let spendable = chain_utxos
+            .iter()
+            .filter(|utxo| !mempool.has_spend(&OutPoint::from(*utxo)))
+            .chain(&mempool_utxos)
+            .map(value)
+            .sum();
+        Ok(Some(PresentValue {
+            height,
+            confirmed,
+            spendable,
+        }))
     }
 
     #[trace]

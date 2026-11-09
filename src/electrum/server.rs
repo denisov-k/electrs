@@ -15,7 +15,7 @@ use serde_json::{from_str, Value};
 
 use electrs_macros::trace;
 
-use crate::chain::Txid;
+use crate::chain::{OutPoint, Txid};
 use crate::config::{Config, RpcLogging};
 use crate::electrum::client_io::write_to_client;
 use crate::electrum::response::{
@@ -418,6 +418,15 @@ impl Connection {
     #[cfg(not(feature = "liquid"))]
     fn blockchain_scripthash_get_balance(&self, params: &[Value]) -> Result<Value> {
         let script_hash = hash_from_value(params.get(0))?;
+
+        // Freicoin: the present value, demurrage taken, unless past the utxo limit
+        if let Some(value) = self.query.present_value(&script_hash[..])? {
+            return Ok(json!({
+                "confirmed": value.confirmed,
+                "unconfirmed": value.spendable as i64 - value.confirmed as i64,
+            }));
+        }
+
         let (chain_stats, mempool_stats) = self.query.stats(&script_hash[..])?;
 
         Ok(json!({
@@ -468,14 +477,22 @@ impl Connection {
     fn blockchain_scripthash_listunspent(&self, params: &[Value]) -> Result<Value> {
         let script_hash = hash_from_value(params.get(0))?;
         let utxos = self.query.utxo(&script_hash[..])?;
+        let refheights = self.query.utxo_refheights(&utxos);
 
         let to_json = |utxo: Utxo| {
-            let json = json!({
+            #[allow(unused_mut)]
+            let mut json = json!({
                 "height": utxo.confirmed.map_or(0, |b| b.height),
                 "tx_pos": utxo.vout,
                 "tx_hash": utxo.txid,
                 "value": utxo.value,
             });
+
+            // Freicoin: the reference height `value` is at, for its present value
+            #[cfg(not(feature = "liquid"))]
+            if let Some(refheight) = refheights.get(&OutPoint::from(&utxo)) {
+                json["refheight"] = json!(refheight);
+            }
 
             #[cfg(feature = "liquid")]
             let json = {
