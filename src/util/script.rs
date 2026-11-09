@@ -27,6 +27,10 @@ pub trait ScriptToAddr {
 #[cfg(not(feature = "liquid"))]
 impl ScriptToAddr for bitcoin::Script {
     fn to_address_str(&self, network: Network) -> Option<String> {
+        // Freicoin: its witness programs' addresses, of every version, as freicoind gives them
+        if crate::freicoin::witness::program(self.as_bytes()).is_some() {
+            return crate::freicoin::witness::address(self.as_bytes(), network);
+        }
         bitcoin::Address::from_script(self, bitcoin::Network::from(network))
             .map(|s| s.to_string())
             .ok()

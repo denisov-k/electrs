@@ -364,12 +364,8 @@ impl TxOutValue {
             "p2pkh"
         } else if script.is_p2sh() {
             "p2sh"
-        } else if script.is_p2wpkh() {
-            "v0_p2wpkh"
-        } else if script.is_p2wsh() {
-            "v0_p2wsh"
-        } else if script.is_p2tr() {
-            "v1_p2tr"
+        } else if let Some(witness_type) = witness_type(script) {
+            witness_type
         } else if script.is_op_return() {
             "provably_unspendable"
         } else if is_witness_commitment(script) {
@@ -396,6 +392,25 @@ impl TxOutValue {
             #[cfg(feature = "liquid")]
             pegout,
         }
+    }
+}
+
+/// The type of a witness program output: Freicoin's, as freicoind names them.
+#[cfg(not(feature = "liquid"))]
+fn witness_type(script: &Script) -> Option<&'static str> {
+    crate::freicoin::witness::script_type(script.as_bytes())
+}
+
+#[cfg(feature = "liquid")]
+fn witness_type(script: &Script) -> Option<&'static str> {
+    if script.is_v0_p2wpkh() {
+        Some("v0_p2wpkh")
+    } else if script.is_v0_p2wsh() {
+        Some("v0_p2wsh")
+    } else if script.is_v1_p2tr() {
+        Some("v1_p2tr")
+    } else {
+        None
     }
 }
 
@@ -2113,6 +2128,12 @@ fn to_scripthash(
 }
 
 fn address_to_scripthash(addr: &str, network: Network) -> Result<FullHash, HttpError> {
+    // Freicoin: witness addresses of every version, as freicoind decodes them
+    #[cfg(not(feature = "liquid"))]
+    if let Some(script) = crate::freicoin::witness::script_for_address(addr, network) {
+        return Ok(compute_script_hash(&bitcoin::ScriptBuf::from(script)));
+    }
+
     #[cfg(not(feature = "liquid"))]
     let addr = address::Address::from_str(addr)?;
     #[cfg(feature = "liquid")]

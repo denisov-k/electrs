@@ -168,6 +168,151 @@ pub fn tx_fee<'a>(
     total_in.saturating_sub(total_out)
 }
 
+/// Freicoin's witness programs and their addresses: versions 0 to 30 on the 31 single-byte opcodes
+/// that could start a script before the protocol cleanup, an optional shard prefix and extension
+/// output after the program (CScript::IsWitnessProgram in script/script.cpp), every version's
+/// address with the Bech32m checksum (key_io.cpp).
+pub mod witness {
+    use bitcoin::bech32::primitives::decode::CheckedHrpstring;
+    use bitcoin::bech32::primitives::iter::{ByteIterExt, Fe32IterExt};
+    use bitcoin::bech32::{Bech32m, Fe32, Hrp};
+
+    use crate::chain::Network;
+
+    /// The script opcode of each witness version (the versionmap of addresstype.cpp).
+    const VERSION_OPCODES: [u8; 31] = [
+        0x00, // OP_0
+        0x4f, // OP_1NEGATE
+        0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, // OP_1 to OP_8
+        0x59, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f, 0x60, // OP_9 to OP_16
+        0x61, // OP_NOP
+        0x74, // OP_DEPTH
+        0xab, // OP_CODESEPARATOR
+        0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, // OP_NOP1 to OP_NOP10
+    ];
+
+    /// The characters of the 32 field elements, which the witness version is one of.
+    const BECH32_CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+
+    /// The longest witness program an address can carry (BECH32_WITNESS_PROG_MAX_LEN).
+    const MAX_PROGRAM: usize = 75;
+
+    /// The witness version and program of `script`, past its shard prefix and extension output
+    /// if any; None for a script that is no witness program.
+    pub fn program(script: &[u8]) -> Option<(u8, &[u8])> {
+        if script.len() < 4 || script.len() > 155 {
+            return None;
+        }
+        let push = script[1] as usize;
+        if !(2..=75).contains(&push) || 2 + push > script.len() {
+            return None;
+        }
+        let mut pos = 2 + push;
+        if pos < script.len() {
+            // the shard prefix: an explicit one-byte push of 0x10 or more (not 0x80), or a small
+            // number opcode
+            match script[pos] {
+                0x01 => {
+                    pos += 1;
+                    match script.get(pos) {
+                        Some(&b) if b >= 0x10 && b != 0x80 => pos += 1,
+                        _ => return None,
+                    }
+                }
+                0x4f | 0x51..=0x60 => pos += 1,
+                _ => {}
+            }
+            // the extension output, a push of 2 to 75 bytes ending the script
+            if pos != script.len() {
+                let len = script[pos] as usize;
+                if !(2..=75).contains(&len) || pos + 1 + len != script.len() {
+                    return None;
+                }
+            }
+        }
+        let version = VERSION_OPCODES.iter().position(|&op| op == script[0])? as u8;
+        Some((version, &script[2..2 + push]))
+    }
+
+    /// The type of a witness program output, as freicoind names it.
+    pub fn script_type(script: &[u8]) -> Option<&'static str> {
+        let (version, program) = program(script)?;
+        Some(match (version, program.len()) {
+            (0, 20) => "witness_v0_shorthash",
+            (0, 32) => "witness_v0_longhash",
+            (1, 2) if program == [0x4e, 0x73] => "anchor",
+            _ => "witness_unknown",
+        })
+    }
+
+    fn hrp(network: Network) -> Hrp {
+        Hrp::parse_unchecked(match network {
+            Network::Bitcoin => "fc",
+            Network::Regtest => "fcrt",
+            _ => "tf",
+        })
+    }
+
+    /// Whether a version and program has an address, as key_io.cpp encodes them.
+    fn has_address(version: u8, program: &[u8]) -> bool {
+        match version {
+            0 => program.len() == 20 || program.len() == 32,
+            1..=30 => (2..=MAX_PROGRAM).contains(&program.len()),
+            _ => false,
+        }
+    }
+
+    /// The address of a witness program output, None for one without one.
+    pub fn address(script: &[u8], network: Network) -> Option<String> {
+        let (version, program) = program(script)?;
+        if !has_address(version, program) {
+            return None;
+        }
+        let version = Fe32::from_char(BECH32_CHARSET[version as usize] as char).ok()?;
+        Some(
+            program
+                .iter()
+                .copied()
+                .bytes_to_fes()
+                .with_checksum::<Bech32m>(&hrp(network))
+                .with_witness_version(version)
+                .chars()
+                .collect(),
+        )
+    }
+
+    /// The output script of a witness address of `network`, None for a string that is not one.
+    pub fn script_for_address(address: &str, network: Network) -> Option<Vec<u8>> {
+        let checked = CheckedHrpstring::new::<Bech32m>(address).ok()?;
+        if checked.hrp() != hrp(network) {
+            return None;
+        }
+        // the version is the first field element, to 30 (the bech32 crate's segwit takes 16 at most)
+        let data = checked
+            .data_part_ascii_no_checksum()
+            .iter()
+            .map(|&c| Fe32::from_char(c as char))
+            .collect::<Result<Vec<Fe32>, _>>()
+            .ok()?;
+        let (version, rest) = data.split_first()?;
+        let version = version.to_u8();
+        // the program's bytes, its last field element padded with 4 zero bits at most
+        let padding = rest.len() * 5 % 8;
+        if padding > 4 || rest.last().map_or(0, |fe| fe.to_u8() & ((1 << padding) - 1)) != 0 {
+            return None;
+        }
+        let program: Vec<u8> = rest.iter().copied().fes_to_bytes().collect();
+        if version > 30 || !has_address(version, &program) {
+            return None;
+        }
+        let mut script = Vec::with_capacity(2 + program.len());
+        script.push(VERSION_OPCODES[version as usize]);
+        script.push(program.len() as u8);
+        script.extend_from_slice(&program);
+        Some(script)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,6 +599,40 @@ mod tests {
             // getblock's fee, which leaves out the per-input adjustment of the early chain
             assert_eq!(tx_fee(&tx, prevouts, 0), f.fee, "{}", f.txid);
         }
+    }
+
+    /// freicoind's decodescript of witness programs: versions past 16, shard prefixes,
+    /// extension outputs, the anchor, and an invalid shard prefix.
+    #[test]
+    fn witness_programs() {
+        let p20 = "cc".repeat(20);
+        let vectors = [
+            (format!("6114{}", p20), "witness_unknown", Some("fc1jenxvenxvenxvenxvenxvenxvenxvenxvt5wfuv")),
+            (format!("b914{}", p20), "witness_unknown", Some("fc17enxvenxvenxvenxvenxvenxvenxvenxvy3uxjr")),
+            (format!("0014{}0110", p20), "witness_v0_shorthash", Some("fc1qenxvenxvenxvenxvenxvenxvenxvenxvfdctfw")),
+            (format!("0014{}52", p20), "witness_v0_shorthash", Some("fc1qenxvenxvenxvenxvenxvenxvenxvenxvfdctfw")),
+            (format!("0014{}5202abcd", p20), "witness_v0_shorthash", Some("fc1qenxvenxvenxvenxvenxvenxvenxvenxvfdctfw")),
+            ("4f024e73".to_string(), "anchor", Some("fc1pfeespydjng")),
+            (
+                "0020aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                "witness_v0_longhash",
+                Some("fc1q424242424242424242424242424242424242424242424242424q9ejjz5"),
+            ),
+        ];
+        for (hex, script_type, address) in vectors {
+            let script = Vec::<u8>::from_hex(&hex).unwrap();
+            assert_eq!(witness::script_type(&script), Some(script_type), "{}", hex);
+            assert_eq!(witness::address(&script, Network::Bitcoin).as_deref(), address, "{}", hex);
+            // an address gives the plain program's script, without shard prefix or extension
+            let address = address.unwrap();
+            let plain = witness::script_for_address(address, Network::Bitcoin)
+                .unwrap_or_else(|| panic!("no script for {}", address));
+            assert_eq!(&script[..plain.len()], &plain[..], "{}", hex);
+            assert!(witness::script_for_address(address, Network::Regtest).is_none());
+        }
+        let invalid_shard = Vec::<u8>::from_hex(&format!("0014{}0105", p20)).unwrap();
+        assert_eq!(witness::script_type(&invalid_shard), None);
+        assert_eq!(witness::address(&invalid_shard, Network::Bitcoin), None);
     }
 
     #[test]
