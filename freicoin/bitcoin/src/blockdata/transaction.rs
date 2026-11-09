@@ -53,9 +53,10 @@ hashes::hash_newtype! {
 impl_hashencode!(Txid);
 impl_hashencode!(Wtxid);
 
-/// The marker MUST be a 1-byte zero value: 0x00. (BIP-141)
-const SEGWIT_MARKER: u8 = 0x00;
-/// The flag MUST be a 1-byte non-zero value. Currently, 0x01 MUST be used. (BIP-141)
+/// Freicoin: the extended serialization starts with 0xff where the input count would be (more
+/// than 2^32 inputs, which no transaction can have), then a non-zero flags byte.
+const SEGWIT_MARKER: u8 = 0xff;
+/// Freicoin: flags bit 0 is the input witnesses, the only flag defined.
 const SEGWIT_FLAG: u8 = 0x01;
 
 /// A reference to a transaction output.
@@ -703,6 +704,10 @@ pub struct Transaction {
     /// * [BIP-65 OP_CHECKLOCKTIMEVERIFY](https://github.com/bitcoin/bips/blob/master/bip-0065.mediawiki)
     /// * [BIP-113 Median time-past as endpoint for lock-time calculations](https://github.com/bitcoin/bips/blob/master/bip-0113.mediawiki)
     pub lock_time: absolute::LockTime,
+    /// Freicoin: the reference height, the block height at which the output values are
+    /// denominated (demurrage).  It follows `lock_time` in the serialization, except in a
+    /// version 1 transaction with a single null-prevout input (an early coinbase), where it is 0.
+    pub lock_height: u32,
     /// List of transaction inputs.
     pub input: Vec<TxIn>,
     /// List of transaction outputs.
@@ -717,6 +722,7 @@ impl cmp::Ord for Transaction {
         self.version
             .cmp(&other.version)
             .then(self.lock_time.to_consensus_u32().cmp(&other.lock_time.to_consensus_u32()))
+            .then(self.lock_height.cmp(&other.lock_height))
             .then(self.input.cmp(&other.input))
             .then(self.output.cmp(&other.output))
     }
@@ -745,6 +751,7 @@ impl Transaction {
         let cloned_tx = Transaction {
             version: self.version,
             lock_time: self.lock_time,
+            lock_height: self.lock_height,
             input: self
                 .input
                 .iter()
@@ -780,8 +787,21 @@ impl Transaction {
         self.input.consensus_encode(&mut enc).expect("engines don't error");
         self.output.consensus_encode(&mut enc).expect("engines don't error");
         self.lock_time.consensus_encode(&mut enc).expect("engines don't error");
+        if self.has_lock_height() {
+            self.lock_height.consensus_encode(&mut enc).expect("engines don't error");
+        }
         Txid::from_engine(enc)
     }
+
+    /// Freicoin: whether `lock_height` is serialized, which it is unless this is a version 1
+    /// transaction with a single null-prevout input.
+    pub fn has_lock_height(&self) -> bool {
+        self.version != Version::ONE
+            || self.input.len() != 1
+            || !self.input[0].previous_output.is_null()
+    }
+
+    fn lock_height_size(&self) -> usize { if self.has_lock_height() { 4 } else { 0 } }
 
     /// Computes the segwit version of the transaction id.
     ///
@@ -841,7 +861,7 @@ impl Transaction {
         size += VarInt::from(self.output.len()).size();
         size += self.output.iter().map(|output| output.size()).sum::<usize>();
 
-        size + absolute::LockTime::SIZE
+        size + absolute::LockTime::SIZE + self.lock_height_size()
     }
 
     /// Returns the total transaction size.
@@ -867,7 +887,7 @@ impl Transaction {
         size += VarInt::from(self.output.len()).size();
         size += self.output.iter().map(|output| output.size()).sum::<usize>();
 
-        size + absolute::LockTime::SIZE
+        size + absolute::LockTime::SIZE + self.lock_height_size()
     }
 
     /// Returns the "virtual size" (vsize) of this transaction.
@@ -1053,12 +1073,9 @@ impl Transaction {
 
     /// Returns whether or not to serialize transaction as specified in BIP-144.
     fn uses_segwit_serialization(&self) -> bool {
-        if self.input.iter().any(|input| !input.witness.is_empty()) {
-            return true;
-        }
-        // To avoid serialization ambiguity, no inputs means we use BIP141 serialization (see
-        // `Transaction` docs for full explanation).
-        self.input.is_empty()
+        // Freicoin's marker cannot be read as an input count, so a transaction without inputs
+        // needs no extended serialization.
+        self.input.iter().any(|input| !input.witness.is_empty())
     }
 
     /// Returns a reference to the input at `input_index` if it exists.
@@ -1253,6 +1270,9 @@ impl Encodable for Transaction {
             }
         }
         len += self.lock_time.consensus_encode(w)?;
+        if self.has_lock_height() {
+            len += self.lock_height.consensus_encode(w)?;
+        }
         Ok(len)
     }
 }
@@ -1262,41 +1282,61 @@ impl Decodable for Transaction {
         r: &mut R,
     ) -> Result<Self, encode::Error> {
         let version = Version::consensus_decode_from_finite_reader(r)?;
-        let input = Vec::<TxIn>::consensus_decode_from_finite_reader(r)?;
-        // segwit
-        if input.is_empty() {
-            let segwit_flag = u8::consensus_decode_from_finite_reader(r)?;
-            match segwit_flag {
-                // BIP144 input witnesses
-                1 => {
-                    let mut input = Vec::<TxIn>::consensus_decode_from_finite_reader(r)?;
-                    let output = Vec::<TxOut>::consensus_decode_from_finite_reader(r)?;
-                    for txin in input.iter_mut() {
-                        txin.witness = Decodable::consensus_decode_from_finite_reader(r)?;
-                    }
-                    if !input.is_empty() && input.iter().all(|input| input.witness.is_empty()) {
-                        Err(encode::Error::ParseFailed("witness flag set but no witnesses present"))
-                    } else {
-                        Ok(Transaction {
-                            version,
-                            input,
-                            output,
-                            lock_time: Decodable::consensus_decode_from_finite_reader(r)?,
-                        })
-                    }
-                }
-                // We don't support anything else
-                x => Err(encode::Error::UnsupportedSegwitFlag(x)),
+        // The input count, unless it is Freicoin's extended serialization marker.
+        let first = u8::consensus_decode_from_finite_reader(r)?;
+        let (flags, input_count) = if first == SEGWIT_MARKER {
+            let flags = u8::consensus_decode_from_finite_reader(r)?;
+            if flags == 0 {
+                return Err(encode::Error::ParseFailed("extended transaction without flags"));
             }
-        // non-segwit
+            (flags, VarInt::consensus_decode_from_finite_reader(r)?.0)
         } else {
-            Ok(Transaction {
-                version,
-                input,
-                output: Decodable::consensus_decode_from_finite_reader(r)?,
-                lock_time: Decodable::consensus_decode_from_finite_reader(r)?,
-            })
+            (0, varint_after(first, r)?)
+        };
+        // Bounds the allocation as Vec decoding does: an input takes at least 41 bytes.
+        if input_count > (encode::MAX_VEC_SIZE / 41) as u64 {
+            return Err(encode::Error::OversizedVectorAllocation {
+                requested: input_count as usize,
+                max: encode::MAX_VEC_SIZE / 41,
+            });
         }
+        let mut input = Vec::with_capacity(input_count as usize);
+        for _ in 0..input_count {
+            input.push(TxIn::consensus_decode_from_finite_reader(r)?);
+        }
+        let output = Vec::<TxOut>::consensus_decode_from_finite_reader(r)?;
+        if flags & SEGWIT_FLAG != 0 {
+            for txin in input.iter_mut() {
+                txin.witness = Decodable::consensus_decode_from_finite_reader(r)?;
+            }
+            if input.iter().all(|input| input.witness.is_empty()) {
+                return Err(encode::Error::ParseFailed("witness flag set but no witnesses present"));
+            }
+        }
+        if flags & !SEGWIT_FLAG != 0 {
+            return Err(encode::Error::UnsupportedSegwitFlag(flags));
+        }
+        let lock_time = Decodable::consensus_decode_from_finite_reader(r)?;
+        let mut tx = Transaction { version, lock_time, lock_height: 0, input, output };
+        if tx.has_lock_height() {
+            tx.lock_height = Decodable::consensus_decode_from_finite_reader(r)?;
+        }
+        Ok(tx)
+    }
+}
+
+/// The rest of a compact size whose first byte, `first`, is already read (not 0xff).
+fn varint_after<R: Read + ?Sized>(first: u8, r: &mut R) -> Result<u64, encode::Error> {
+    match first {
+        0xFD => {
+            let x = u16::consensus_decode_from_finite_reader(r)?;
+            if x < 0xFD { Err(encode::Error::NonMinimalVarInt) } else { Ok(x.into()) }
+        }
+        0xFE => {
+            let x = u32::consensus_decode_from_finite_reader(r)?;
+            if x < 0x10000 { Err(encode::Error::NonMinimalVarInt) } else { Ok(x.into()) }
+        }
+        n => Ok(n.into()),
     }
 }
 

@@ -214,11 +214,11 @@ impl KnownHrp {
 
     /// Creates a `KnownHrp` from a [`bech32::Hrp`].
     fn from_hrp(hrp: Hrp) -> Result<Self, UnknownHrpError> {
-        if hrp == bech32::hrp::BC {
+        if hrp == HRP_FC {
             Ok(Self::Mainnet)
-        } else if hrp.is_valid_on_testnet() || hrp.is_valid_on_signet() {
+        } else if hrp == HRP_TF {
             Ok(Self::Testnets)
-        } else if hrp == bech32::hrp::BCRT {
+        } else if hrp == HRP_FCRT {
             Ok(Self::Regtest)
         } else {
             Err(UnknownHrpError(hrp.to_lowercase()))
@@ -228,12 +228,19 @@ impl KnownHrp {
     /// Converts, infallibly a known HRP to a [`bech32::Hrp`].
     fn to_hrp(self) -> Hrp {
         match self {
-            Self::Mainnet => bech32::hrp::BC,
-            Self::Testnets => bech32::hrp::TB,
-            Self::Regtest => bech32::hrp::BCRT,
+            Self::Mainnet => HRP_FC,
+            Self::Testnets => HRP_TF,
+            Self::Regtest => HRP_FCRT,
         }
     }
 }
+
+/// Freicoin's mainnet address prefix.
+const HRP_FC: Hrp = Hrp::parse_unchecked("fc");
+/// Freicoin's testnet and signet address prefix.
+const HRP_TF: Hrp = Hrp::parse_unchecked("tf");
+/// Freicoin's regtest address prefix.
+const HRP_FCRT: Hrp = Hrp::parse_unchecked("fcrt");
 
 impl From<Network> for KnownHrp {
     fn from(n: Network) -> Self { Self::from_network(n) }

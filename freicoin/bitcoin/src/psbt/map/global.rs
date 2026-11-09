@@ -98,6 +98,7 @@ impl Psbt {
                                         input: Decodable::consensus_decode(&mut decoder)?,
                                         output: Decodable::consensus_decode(&mut decoder)?,
                                         lock_time: Decodable::consensus_decode(&mut decoder)?,
+                                        lock_height: Decodable::consensus_decode(&mut decoder)?,
                                     });
 
                                     if decoder.position() != vlen as u64 {

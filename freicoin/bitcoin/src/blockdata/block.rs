@@ -72,7 +72,189 @@ pub struct Header {
     pub nonce: u32,
 }
 
-impl_consensus_encoding!(Header, version, prev_blockhash, merkle_root, time, bits, nonce);
+/// Freicoin: the sign bit of `bits` marks the extended header serialization.
+const EXTENDED_HEADER_BIT: u32 = 1 << 23;
+
+impl Encodable for Header {
+    /// The 80-byte header, which is also what the block hash is computed over.  A merge-mined
+    /// header's auxiliary proof-of-work is not kept (see [`AuxPow`]).
+    fn consensus_encode<W: Write + ?Sized>(&self, w: &mut W) -> Result<usize, io::Error> {
+        let mut len = 0;
+        len += self.version.consensus_encode(w)?;
+        len += self.prev_blockhash.consensus_encode(w)?;
+        len += self.merkle_root.consensus_encode(w)?;
+        len += self.time.consensus_encode(w)?;
+        len += self.bits.consensus_encode(w)?;
+        len += self.nonce.consensus_encode(w)?;
+        Ok(len)
+    }
+}
+
+impl Decodable for Header {
+    fn consensus_decode_from_finite_reader<R: Read + ?Sized>(
+        r: &mut R,
+    ) -> Result<Self, encode::Error> {
+        Ok(Header::decode_with_aux_pow(r)?.0)
+    }
+}
+
+impl Header {
+    /// Reads a header in either serialization, returning the auxiliary proof-of-work of the
+    /// extended one (a merge-mined block) apart.
+    pub fn decode_with_aux_pow<R: Read + ?Sized>(
+        r: &mut R,
+    ) -> Result<(Header, Option<AuxPow>), encode::Error> {
+        let version = Decodable::consensus_decode_from_finite_reader(r)?;
+        let prev_blockhash = Decodable::consensus_decode_from_finite_reader(r)?;
+        let merkle_root = Decodable::consensus_decode_from_finite_reader(r)?;
+        let time = Decodable::consensus_decode_from_finite_reader(r)?;
+        let bits = u32::consensus_decode_from_finite_reader(r)?;
+        let nonce = Decodable::consensus_decode_from_finite_reader(r)?;
+        let header = Header {
+            version,
+            prev_blockhash,
+            merkle_root,
+            time,
+            bits: CompactTarget::from_consensus(bits & !EXTENDED_HEADER_BIT),
+            nonce,
+        };
+        let mut aux_pow = None;
+        if bits & EXTENDED_HEADER_BIT != 0 {
+            if u8::consensus_decode_from_finite_reader(r)? != 0xff {
+                return Err(encode::Error::ParseFailed("invalid extended block header dummy value"));
+            }
+            let flags = u8::consensus_decode_from_finite_reader(r)?;
+            if flags & 1 != 0 {
+                aux_pow = Some(AuxPow::consensus_decode_from_finite_reader(r)?);
+            }
+            if flags & !1 != 0 {
+                return Err(encode::Error::ParseFailed("unknown block header optional data"));
+            }
+        }
+        Ok((header, aux_pow))
+    }
+}
+
+/// Freicoin: the auxiliary proof-of-work of a merge-mined block, which follows the header in the
+/// extended serialization: the committed Freicoin header fields, the path to the commitment in
+/// the parent chain's coinbase, and the parent (e.g. Bitcoin) block header fields.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuxPow {
+    /// Committed block version.
+    pub commit_version: i32,
+    /// Committed merkle root.
+    pub commit_merkle_root: [u8; 32],
+    /// Committed time.
+    pub commit_time: u32,
+    /// Committed difficulty bits.
+    pub commit_bits: u32,
+    /// Committed nonce.
+    pub commit_nonce: u32,
+    /// Block withholding secret, low half.
+    pub secret_lo: u64,
+    /// Block withholding secret, high half.
+    pub secret_hi: u64,
+    /// Merkle hash map branch to the merge-mining commitment.
+    pub commit_branch: Vec<(u8, [u8; 32])>,
+    /// SHA-256 midstate of the parent coinbase before the buffer.
+    pub midstate_hash: [u8; 32],
+    /// The rest of the parent coinbase up to its lock time.
+    pub midstate_buffer: Vec<u8>,
+    /// Length of the parent coinbase hashed into the midstate.
+    pub midstate_length: u32,
+    /// Lock time of the parent coinbase.
+    pub aux_lock_time: u32,
+    /// Merkle branch of the parent coinbase.
+    pub aux_branch: Vec<[u8; 32]>,
+    /// Number of transactions in the parent block.
+    pub aux_num_txns: u32,
+    /// Parent block version.
+    pub aux_version: i32,
+    /// Parent block's previous block hash.
+    pub aux_prev_blockhash: BlockHash,
+    /// Parent block difficulty bits.
+    pub aux_bits: u32,
+    /// Parent block nonce.
+    pub aux_nonce: u32,
+}
+
+/// Reads the MSB base-128 VARINT of Freicoin's (and Bitcoin Core's) serialize.h, as a u32.
+fn read_core_varint<R: Read + ?Sized>(r: &mut R) -> Result<u32, encode::Error> {
+    let mut n: u32 = 0;
+    loop {
+        let ch = u8::consensus_decode_from_finite_reader(r)?;
+        if n > (u32::MAX >> 7) {
+            return Err(encode::Error::ParseFailed("varint too large"));
+        }
+        n = (n << 7) | u32::from(ch & 0x7f);
+        if ch & 0x80 == 0 {
+            return Ok(n);
+        }
+        if n == u32::MAX {
+            return Err(encode::Error::ParseFailed("varint too large"));
+        }
+        n += 1;
+    }
+}
+
+impl Decodable for AuxPow {
+    fn consensus_decode_from_finite_reader<R: Read + ?Sized>(
+        r: &mut R,
+    ) -> Result<Self, encode::Error> {
+        let commit_version = Decodable::consensus_decode_from_finite_reader(r)?;
+        let commit_merkle_root = Decodable::consensus_decode_from_finite_reader(r)?;
+        let commit_time = Decodable::consensus_decode_from_finite_reader(r)?;
+        let commit_bits = Decodable::consensus_decode_from_finite_reader(r)?;
+        let commit_nonce = Decodable::consensus_decode_from_finite_reader(r)?;
+        let secret_lo = Decodable::consensus_decode_from_finite_reader(r)?;
+        let secret_hi = Decodable::consensus_decode_from_finite_reader(r)?;
+        let branch_len = VarInt::consensus_decode_from_finite_reader(r)?.0;
+        if branch_len > 256 {
+            return Err(encode::Error::ParseFailed("commitment branch too long"));
+        }
+        let mut commit_branch = Vec::with_capacity(branch_len as usize);
+        for _ in 0..branch_len {
+            let key = u8::consensus_decode_from_finite_reader(r)?;
+            let hash = <[u8; 32]>::consensus_decode_from_finite_reader(r)?;
+            commit_branch.push((key, hash));
+        }
+        let midstate_hash = Decodable::consensus_decode_from_finite_reader(r)?;
+        let midstate_buffer = Vec::<u8>::consensus_decode_from_finite_reader(r)?;
+        let midstate_length = read_core_varint(r)?;
+        let aux_lock_time = Decodable::consensus_decode_from_finite_reader(r)?;
+        let aux_branch_len = VarInt::consensus_decode_from_finite_reader(r)?.0;
+        if aux_branch_len > 64 {
+            return Err(encode::Error::ParseFailed("parent merkle branch too long"));
+        }
+        let mut aux_branch = Vec::with_capacity(aux_branch_len as usize);
+        for _ in 0..aux_branch_len {
+            aux_branch.push(<[u8; 32]>::consensus_decode_from_finite_reader(r)?);
+        }
+        let aux_num_txns = read_core_varint(r)?
+            .checked_add(1)
+            .ok_or(encode::Error::ParseFailed("parent transaction count too large"))?;
+        Ok(AuxPow {
+            commit_version,
+            commit_merkle_root,
+            commit_time,
+            commit_bits,
+            commit_nonce,
+            secret_lo,
+            secret_hi,
+            commit_branch,
+            midstate_hash,
+            midstate_buffer,
+            midstate_length,
+            aux_lock_time,
+            aux_branch,
+            aux_num_txns,
+            aux_version: Decodable::consensus_decode_from_finite_reader(r)?,
+            aux_prev_blockhash: Decodable::consensus_decode_from_finite_reader(r)?,
+            aux_bits: Decodable::consensus_decode_from_finite_reader(r)?,
+            aux_nonce: Decodable::consensus_decode_from_finite_reader(r)?,
+        })
+    }
+}
 
 impl Header {
     /// The number of bytes that the block header contributes to the size of a block.

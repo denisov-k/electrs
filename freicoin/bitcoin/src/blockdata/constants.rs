@@ -74,6 +74,7 @@ const TESTNET4_GENESIS_OUTPUT_PK: [u8; 33] = [0x00; 33];
 fn bitcoin_genesis_tx(params: &Params) -> Transaction {
     // Base
     let mut ret = Transaction {
+        lock_height: 0,
         version: transaction::Version::ONE,
         lock_time: absolute::LockTime::ZERO,
         input: vec![],

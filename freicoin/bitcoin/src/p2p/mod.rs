@@ -214,18 +214,18 @@ pub struct Magic([u8; 4]);
 
 impl Magic {
     /// Bitcoin mainnet network magic bytes.
-    pub const BITCOIN: Self = Self([0xF9, 0xBE, 0xB4, 0xD9]);
+    pub const BITCOIN: Self = Self([0x2c, 0xfe, 0x7e, 0x6d]);
     /// Bitcoin testnet3 network magic bytes.
     #[deprecated(since = "0.32.4", note = "Use TESTNET3 instead")]
-    pub const TESTNET: Self = Self([0x0B, 0x11, 0x09, 0x07]);
+    pub const TESTNET: Self = Self([0x5e, 0xd6, 0x7c, 0xf3]);
     /// Bitcoin testnet3 network magic bytes.
-    pub const TESTNET3: Self = Self([0x0B, 0x11, 0x09, 0x07]);
+    pub const TESTNET3: Self = Self([0x5e, 0xd6, 0x7c, 0xf3]);
     /// Bitcoin testnet4 network magic bytes.
     pub const TESTNET4: Self = Self([0x1c, 0x16, 0x3f, 0x28]);
     /// Bitcoin signet network magic bytes.
     pub const SIGNET: Self = Self([0x0A, 0x03, 0xCF, 0x40]);
     /// Bitcoin regtest network magic bytes.
-    pub const REGTEST: Self = Self([0xFA, 0xBF, 0xB5, 0xDA]);
+    pub const REGTEST: Self = Self([0xed, 0x99, 0x9c, 0xf6]);
 
     /// Create network magic from bytes.
     pub fn from_bytes(bytes: [u8; 4]) -> Magic { Magic(bytes) }

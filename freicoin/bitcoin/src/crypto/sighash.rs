@@ -934,6 +934,7 @@ impl<R: Borrow<Transaction>> SighashCache<R> {
             let mut tx = Transaction {
                 version: self_.version,
                 lock_time: self_.lock_time,
+                lock_height: self_.lock_height,
                 input: vec![],
                 output: vec![],
             };
