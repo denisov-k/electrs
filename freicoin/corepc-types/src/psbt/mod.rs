@@ -67,7 +67,7 @@ impl RawTransaction {
             .collect::<Result<_, _>>()
             .map_err(E::Outputs)?;
 
-        Ok(Transaction { version, lock_time, input, output })
+        Ok(Transaction { version, lock_time, lock_height: 0, input, output })
     }
 }
 

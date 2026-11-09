@@ -1133,6 +1133,7 @@ mod tests {
         let parent = Transaction {
             version: 2,
             lock_time: LockTime::ZERO,
+            lock_height: 0,
             input: vec![TxIn {
                 previous_output: OutPoint {
                     txid: external_txid,
@@ -1148,6 +1149,7 @@ mod tests {
         let other_parent = Transaction {
             version: 2,
             lock_time: LockTime::ZERO,
+            lock_height: 0,
             input: vec![TxIn {
                 previous_output: OutPoint {
                     txid: "22".repeat(32).parse().unwrap(),
@@ -1160,6 +1162,7 @@ mod tests {
         let child = Transaction {
             version: 2,
             lock_time: LockTime::ZERO,
+            lock_height: 0,
             input: vec![
                 TxIn {
                     previous_output: OutPoint {

@@ -512,6 +512,7 @@ mod tests {
         Transaction {
             version: transaction::Version::TWO,
             lock_time: absolute::LockTime::ZERO,
+            lock_height: 0,
             input: vec![TxIn {
                 previous_output: OutPoint::null(),
                 script_sig: ScriptBuf::new(),

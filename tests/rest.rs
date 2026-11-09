@@ -1771,6 +1771,7 @@ fn same_txid_witness_variants(tester: &mut common::TestRunner) -> Result<(Txid, 
     let spend = |witness_item: &[u8]| Transaction {
         version: transaction::Version::TWO,
         lock_time: absolute::LockTime::ZERO,
+        lock_height: 0,
         input: vec![TxIn {
             previous_output: OutPoint::new(funding_txid, vout),
             script_sig: ScriptBuf::new(),

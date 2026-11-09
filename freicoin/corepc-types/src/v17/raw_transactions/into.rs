@@ -384,7 +384,7 @@ impl GetRawTransactionVerbose {
             .collect::<Result<_, _>>()
             .map_err(E::Outputs)?;
 
-        let transaction = Transaction { version, lock_time, input, output };
+        let transaction = Transaction { version, lock_time, lock_height: 0, input, output };
         let block_hash =
             self.block_hash.map(|s| s.parse::<BlockHash>()).transpose().map_err(E::BlockHash)?;
 

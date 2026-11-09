@@ -286,6 +286,7 @@ impl TestRunner {
         let tx = bitcoin::Transaction {
             version: bitcoin::transaction::Version::TWO,
             lock_time: bitcoin::absolute::LockTime::ZERO,
+            lock_height: 0,
             input: vec![input],
             output: outputs,
         };

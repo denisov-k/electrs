@@ -189,19 +189,19 @@ impl Config {
             .arg(
                 Arg::with_name("daemon_dir")
                     .long("daemon-dir")
-                    .help("Data directory of Bitcoind (default: ~/.bitcoin/)")
+                    .help("Data directory of freicoind (default: ~/.freicoin/)")
                     .takes_value(true),
             )
             .arg(
                 Arg::with_name("blocks_dir")
                     .long("blocks-dir")
-                    .help("Analogous to bitcoind's -blocksdir option, this specifies the directory containing the raw blocks files (blk*.dat) (default: ~/.bitcoin/blocks/)")
+                    .help("Analogous to bitcoind's -blocksdir option, this specifies the directory containing the raw blocks files (blk*.dat) (default: ~/.freicoin/blocks/)")
                     .takes_value(true),
             )
             .arg(
                 Arg::with_name("cookie")
                     .long("cookie")
-                    .help("JSONRPC authentication cookie ('USER:PASSWORD', default: read from ~/.bitcoin/.cookie)")
+                    .help("JSONRPC authentication cookie ('USER:PASSWORD', default: read from ~/.freicoin/.cookie)")
                     .takes_value(true),
             )
             .arg(
@@ -258,7 +258,7 @@ impl Config {
             .arg(
                 Arg::with_name("daemon_rpc_addr")
                     .long("daemon-rpc-addr")
-                    .help("Bitcoin daemon JSONRPC 'addr:port' to connect (default: 127.0.0.1:8332 for mainnet, 127.0.0.1:18332 for testnet3 and 127.0.0.1:48332 for testnet4 and 127.0.0.1:18443 for regtest)")
+                    .help("Freicoin daemon JSONRPC 'addr:port' to connect (default: 127.0.0.1:8638 for mainnet, 127.0.0.1:18638 for testnet, 127.0.0.1:38638 for signet and 127.0.0.1:28638 for regtest)")
                     .takes_value(true),
             )
             .arg(
@@ -501,15 +501,15 @@ impl Config {
 
         let default_daemon_port = match network_type {
             #[cfg(not(feature = "liquid"))]
-            Network::Bitcoin => 8332,
+            Network::Bitcoin => 8638,
             #[cfg(not(feature = "liquid"))]
-            Network::Testnet => 18332,
+            Network::Testnet => 18638,
             #[cfg(not(feature = "liquid"))]
             Network::Testnet4 => 48332,
             #[cfg(not(feature = "liquid"))]
-            Network::Regtest => 18443,
+            Network::Regtest => 28638,
             #[cfg(not(feature = "liquid"))]
-            Network::Signet => 38332,
+            Network::Signet => 38638,
 
             #[cfg(feature = "liquid")]
             Network::Liquid => 7041,
@@ -704,7 +704,7 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|| {
                 let mut default_dir = home_dir().expect("no homedir");
-                default_dir.push(".bitcoin");
+                default_dir.push(".freicoin");
                 default_dir
             });
 
@@ -877,7 +877,7 @@ pub fn get_network_subdir(network: Network) -> Option<&'static str> {
         #[cfg(not(feature = "liquid"))]
         Network::Bitcoin => None,
         #[cfg(not(feature = "liquid"))]
-        Network::Testnet => Some("testnet3"),
+        Network::Testnet => Some("testnet"),
         #[cfg(not(feature = "liquid"))]
         Network::Testnet4 => Some("testnet4"),
         #[cfg(not(feature = "liquid"))]

@@ -2430,6 +2430,7 @@ mod tests {
             let tx = Transaction {
                 version: bitcoin::transaction::Version::TWO,
                 lock_time: bitcoin::absolute::LockTime::ZERO,
+                lock_height: 0,
                 input: vec![bitcoin::TxIn {
                     previous_output: OutPoint::new(funding_txid, vout),
                     ..Default::default()

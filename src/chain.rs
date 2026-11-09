@@ -122,17 +122,26 @@ pub fn genesis_hash(network: Network) -> BlockHash {
 }
 
 pub fn bitcoin_genesis_hash(network: BNetwork) -> bitcoin::BlockHash {
+    // Freicoin's genesis blocks (kernel/chainparams.cpp); testnet4 is Bitcoin's, unused.
     lazy_static! {
         static ref BITCOIN_GENESIS: bitcoin::BlockHash =
-            genesis_block(BNetwork::Bitcoin).block_hash();
+            "000000005b1e3d23ecfd2dd4a6e1a35238aa0392c0a8528c40df52376d7efe2c"
+                .parse()
+                .unwrap();
         static ref TESTNET_GENESIS: bitcoin::BlockHash =
-            genesis_block(BNetwork::Testnet).block_hash();
+            "000000003b5183593282fd30d3d7e79243eb883d6c2d8670f69811c6b9a76585"
+                .parse()
+                .unwrap();
         static ref TESTNET4_GENESIS: bitcoin::BlockHash =
             genesis_block(BNetwork::Testnet4).block_hash();
         static ref REGTEST_GENESIS: bitcoin::BlockHash =
-            genesis_block(BNetwork::Regtest).block_hash();
+            "67756db06265141574ff8e7c3f97ebd57c443791e0ca27ee8b03758d6056edb8"
+                .parse()
+                .unwrap();
         static ref SIGNET_GENESIS: bitcoin::BlockHash =
-            genesis_block(BNetwork::Signet).block_hash();
+            "000000500fc45aa5ed5763371527daca0ddc04212352e4759b8c9b563cc53934"
+                .parse()
+                .unwrap();
     }
     match network {
         BNetwork::Bitcoin => *BITCOIN_GENESIS,

@@ -987,6 +987,7 @@ mod tests {
             Transaction {
                 version: Version::TWO,
                 lock_time: LockTime::ZERO,
+                lock_height: 0,
                 input: vec![TxIn {
                     previous_output: prevout,
                     script_sig: Default::default(),
@@ -1005,6 +1006,7 @@ mod tests {
             Transaction {
                 version: 2,
                 lock_time: LockTime::ZERO,
+                lock_height: 0,
                 input: vec![TxIn {
                     previous_output: prevout,
                     asset_issuance: if prevout.is_null() {

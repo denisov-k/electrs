@@ -108,3 +108,11 @@ rev = "d3792352992a539afffbe11501d1aff9fd5b919d"            # add-peer branch
 [patch.crates-io.electrumd]
 git = "https://github.com/shesek/electrumd"
 rev = "9897271b3538ef1e20166ec870746af8167a8d4b"
+
+# Freicoin's transaction and block formats, network magic and address prefixes
+[patch.crates-io.bitcoin]
+path = "freicoin/bitcoin"
+
+# a dev-dependency that builds bitcoin::Transaction, which now has lock_height
+[patch.crates-io.corepc-types]
+path = "freicoin/corepc-types"
