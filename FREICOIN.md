@@ -60,12 +60,17 @@ REST:
   and those spendable counting the mempool. It is null past `--utxos-limit`. The `chain_stats` and
   `mempool_stats` sums stay face values.
 - `GET /address/:address/utxo` adds each output's `refheight` and `present_value`.
-- `GET /block/:hash` of a merge-mined block adds `parent_block`. This is the parent chain (bitcoin)
-  block its auxiliary proof-of-work commits to, reconstructed as consensus does it (`aux_pow` in
+- `GET /block/:hash` of a merge-mined block adds `parent_block`. This is the parent chain block
+  header its auxiliary proof-of-work commits to, reconstructed as consensus does it (`aux_pow` in
   `src/freicoin.rs`). It gives the parent's hash, previous block, version, Merkle root, time, bits,
   nonce and transaction count. It also gives `meets_target`, whether the parent's hash meets the
-  block's auxiliary target, which a correct reconstruction does, and `is_parent_chain_block`,
-  whether it also meets the parent chain's own target (a bitcoin block rather than a pool share).
+  block's auxiliary target, which a correct reconstruction does, and `meets_own_target`, whether it
+  also meets its own `bits`.
+- Consensus checks only the work done on that header, not that the parent exists. On mainnet, the
+  parents of the share chain pool's blocks are bitcoin block templates, at bitcoin's difficulty and
+  on bitcoin's tip. Most other blocks (late 2026) commit to headers of no known chain, whose bits
+  their miner set near Freicoin's own target. So neither `meets_own_target` nor the previous block
+  makes a parent a bitcoin block.
   electrs reads the extended header from freicoind's `getblockheader` and caches it.
 - Block sizes count a merge-mined header's auxiliary proof-of-work, as freicoind's do.
 - The single output of each block's block-final transaction, which carries the block's witness

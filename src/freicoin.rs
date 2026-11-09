@@ -193,9 +193,10 @@ pub mod aux_pow {
         /// Whether its hash meets the merge-mined block's auxiliary target, as consensus checks
         /// (the first stage): a reconstruction that does is the one the block proves.
         pub meets_target: bool,
-        /// Whether its hash also meets its own (the parent chain's) target: a block of the parent
-        /// chain, not only a share of the merge-mining pool.
-        pub is_parent_chain_block: bool,
+        /// Whether its hash also meets its own nBits. A block of the parent chain does, but the
+        /// miner sets those bits, and consensus does not check the parent exists: this does not
+        /// make it one of that chain's blocks.
+        pub meets_own_target: bool,
     }
 
     /// The tag hash of the merge-mining commitments' path in the parent's Merkle hash map, per
@@ -450,7 +451,7 @@ pub mod aux_pow {
         let bias = (aux.commit_nonce & 0xff) as u8;
         let meets_target =
             valid && meets(hash.as_byte_array(), aux.commit_bits, bias).unwrap_or(false);
-        let is_parent_chain_block =
+        let meets_own_target =
             meets_target && meets(hash.as_byte_array(), aux.aux_bits, 0).unwrap_or(false);
 
         ParentBlock {
@@ -463,7 +464,7 @@ pub mod aux_pow {
             nonce: parent.nonce,
             tx_count: aux.aux_num_txns,
             meets_target,
-            is_parent_chain_block,
+            meets_own_target,
         }
     }
 }
