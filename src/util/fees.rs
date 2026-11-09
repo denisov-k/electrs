@@ -18,7 +18,8 @@ impl TxFeeInfo {
         refheights: &HashMap<OutPoint, u32>,
         network: Network,
     ) -> Self {
-        let fee = get_tx_fee(tx, prevouts, refheights, network);
+        // the mempool's, unconfirmed
+        let fee = get_tx_fee(tx, prevouts, refheights, None, network);
 
         let weight = tx.weight();
         #[cfg(not(feature = "liquid"))] // rust-bitcoin has a wrapper Weight type
@@ -36,13 +37,15 @@ impl TxFeeInfo {
 
 /// Freicoin: the inputs are valued at the transaction's `lock_height` (demurrage), each from its
 /// reference height in `refheights`; an input whose reference height is unknown counts at its face
-/// value, which overstates the fee.
+/// value, which overstates the fee.  `height` is that of the block confirming the transaction, if
+/// any, for the per-input adjustment of the early mainnet chain.
 #[cfg(not(feature = "liquid"))]
 pub fn get_tx_fee(
     tx: &Transaction,
     prevouts: &HashMap<u32, &TxOut>,
     refheights: &HashMap<OutPoint, u32>,
-    _network: Network,
+    height: Option<usize>,
+    network: Network,
 ) -> u64 {
     crate::freicoin::tx_fee(
         tx,
@@ -50,6 +53,7 @@ pub fn get_tx_fee(
             let outpoint = tx.input[index as usize].previous_output;
             (txo, refheights.get(&outpoint).copied().unwrap_or(tx.lock_height))
         }),
+        crate::freicoin::per_input_adjustment(network, height),
     )
 }
 
@@ -58,6 +62,7 @@ pub fn get_tx_fee(
     tx: &Transaction,
     _prevouts: &HashMap<u32, &TxOut>,
     _refheights: &HashMap<OutPoint, u32>,
+    _height: Option<usize>,
     network: Network,
 ) -> u64 {
     tx.fee_in(*network.native_asset())

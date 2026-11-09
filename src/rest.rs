@@ -186,7 +186,8 @@ impl TransactionValue {
             .map(|txout| TxOutValue::new(txout, config))
             .collect();
 
-        let fee = get_tx_fee(&tx, &prevouts, refheights, config.network_type);
+        let height = blockid.as_ref().map(|b| b.height);
+        let fee = get_tx_fee(&tx, &prevouts, refheights, height, config.network_type);
 
         let weight = tx.weight();
         #[cfg(not(feature = "liquid"))] // rust-bitcoin has a wrapper Weight type

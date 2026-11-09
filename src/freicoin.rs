@@ -4,7 +4,7 @@
 //! decays by a factor of (1 - 2^-20) per block after it.  A transaction's fee is therefore its
 //! inputs' values adjusted to its own `lock_height`, less its outputs.
 
-use crate::chain::{Transaction, TxOut};
+use crate::chain::{Network, Transaction, TxOut};
 
 /// The exponentiation ladder of (1 - 2^-20)^(2^i), i = 0..26, as 64-bit fixed point fractions,
 /// most significant word first (consensus/amount.cpp).
@@ -116,15 +116,39 @@ pub fn value_at(value: u64, refheight: u32, height: u32) -> u64 {
     time_adjust_value_forward(value as i64, height - refheight) as u64
 }
 
-/// A transaction's fee: its inputs' values adjusted to its `lock_height`, less its outputs.
-/// `prevouts` gives each input's spent output with the `lock_height` of the transaction that
-/// created it.  A coinbase pays no fee.
-pub fn tx_fee<'a>(tx: &Transaction, prevouts: impl Iterator<Item = (&'a TxOut, u32)>) -> u64 {
+/// Mainnet heights of the soft forks that each dropped a kria credited to every input on top of
+/// its adjusted value: the truncation of fractional inputs, then the ALU demurrage arithmetic
+/// (`truncate_inputs_activation_height` and `alu_activation_height` in kernel/chainparams.cpp).
+const TRUNCATE_INPUTS_HEIGHT: usize = 158_425;
+const ALU_HEIGHT: usize = 229_376;
+
+/// What each input of a transaction confirmed at `height` counts for on top of its adjusted value,
+/// as consensus (`per_input_adjustment` of `CheckTxInputs`) has it: a kria before each of the
+/// truncation and ALU soft forks on mainnet, none on the test chains or in the mempool.
+pub fn per_input_adjustment(network: Network, height: Option<usize>) -> u64 {
+    match (network, height) {
+        (Network::Bitcoin, Some(height)) => {
+            (height < TRUNCATE_INPUTS_HEIGHT) as u64 + (height < ALU_HEIGHT) as u64
+        }
+        _ => 0,
+    }
+}
+
+/// A transaction's fee: its inputs' values adjusted to its `lock_height`, each plus `adjustment`
+/// (see [`per_input_adjustment`]), less its outputs.  `prevouts` gives each input's spent output
+/// with the `lock_height` of the transaction that created it.  A coinbase pays no fee.
+pub fn tx_fee<'a>(
+    tx: &Transaction,
+    prevouts: impl Iterator<Item = (&'a TxOut, u32)>,
+    adjustment: u64,
+) -> u64 {
     if tx.is_coinbase() {
         return 0;
     }
     let total_in: u64 = prevouts
-        .map(|(txo, refheight)| value_at(txo.value.to_sat(), refheight, tx.lock_height))
+        .map(|(txo, refheight)| {
+            value_at(txo.value.to_sat(), refheight, tx.lock_height) + adjustment
+        })
         .sum();
     let total_out: u64 = tx.output.iter().map(|out| out.value.to_sat()).sum();
     total_in.saturating_sub(total_out)
@@ -413,7 +437,52 @@ mod tests {
                 })
                 .collect();
             let prevouts = txos.iter().zip(f.prevouts.iter().map(|p| p.1));
-            assert_eq!(tx_fee(&tx, prevouts), f.fee, "{}", f.txid);
+            // getblock's fee, which leaves out the per-input adjustment of the early chain
+            assert_eq!(tx_fee(&tx, prevouts, 0), f.fee, "{}", f.txid);
+        }
+    }
+
+    #[test]
+    fn early_mainnet_input_adjustment() {
+        assert_eq!(per_input_adjustment(Network::Bitcoin, Some(61_823)), 2);
+        assert_eq!(per_input_adjustment(Network::Bitcoin, Some(158_424)), 2);
+        assert_eq!(per_input_adjustment(Network::Bitcoin, Some(158_425)), 1);
+        assert_eq!(per_input_adjustment(Network::Bitcoin, Some(229_375)), 1);
+        assert_eq!(per_input_adjustment(Network::Bitcoin, Some(229_376)), 0);
+        assert_eq!(per_input_adjustment(Network::Bitcoin, None), 0);
+        assert_eq!(per_input_adjustment(Network::Regtest, Some(0)), 0);
+
+        // Block 61823 confirms two transactions whose outputs exceed their inputs' adjusted values,
+        // by 4 and 1 kria, valid only by the 2 kria then credited to each input.  The (value,
+        // refheight) of their spent outputs, and their fees.
+        let cases: [(&[(u64, u32)], u64); 2] = [
+            (
+                &[
+                    (19418710263, 61150),
+                    (19419095028, 61146),
+                    (19380876956, 61583),
+                    (19418907649, 61148),
+                    (19419391102, 61143),
+                    (19418414191, 61153),
+                ],
+                8,
+            ),
+            (&[(19383132715, 61511), (19419588484, 61141)], 3),
+        ];
+        let hexes = include_str!("../tests/freicoin/mainnet-61823.txt");
+        for (hex, (inputs, fee)) in hexes.lines().zip(cases) {
+            let tx: Transaction = deserialize(&Vec::<u8>::from_hex(hex.trim()).unwrap()).unwrap();
+            let txos: Vec<TxOut> = inputs
+                .iter()
+                .map(|&(value, _)| TxOut {
+                    value: bitcoin::Amount::from_sat(value),
+                    script_pubkey: Default::default(),
+                })
+                .collect();
+            let prevouts = || txos.iter().zip(inputs.iter().map(|p| p.1));
+            assert_eq!(tx_fee(&tx, prevouts(), 0), 0, "outputs above the adjusted inputs");
+            let adjustment = per_input_adjustment(Network::Bitcoin, Some(61_823));
+            assert_eq!(tx_fee(&tx, prevouts(), adjustment), fee);
         }
     }
 }
